@@ -290,8 +290,11 @@ Without `-p`, redirected stdin is read as one prompt, including embedded newline
 printf 'inspect this project\nand list the risks' | raw
 ```
 
-In-session: `/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
+In-session: `/help` `/settings` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
+
+Press `F2` or run `/settings` for a full-screen settings panel. Its buttons can be clicked in terminals
+with SGR mouse support; arrow keys, Tab, Enter, and Esc provide the same controls everywhere.
 
 `/context` shows current usage; `/context 256k` changes the context window for the current session.
 Use `raw setup <provider> --context-window 256k ...` to save a provider-level default.

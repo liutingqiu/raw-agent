@@ -8,6 +8,7 @@ import { Editor } from "../src/tui/editor.ts";
 import { clip, displayWidth, pad, screen } from "../src/tui/term.ts";
 import { Block, fitViewport, statusLine, meter, humanTokens, rule, startupLines } from "../src/tui/ui.ts";
 import { commandCompletions, findCommand, PERMISSION_ORDER } from "../src/tui/commands.ts";
+import { renderSettings } from "../src/tui/settings.ts";
 
 /* ------------------------------------------------------------------ *
  * key parsing
@@ -36,6 +37,16 @@ test("modified arrows carry their modifiers", () => {
   assert.equal(keys[0].id, "ctrl+right");
   assert.equal(keys[1].id, "alt+left");
   assert.equal(keys[2].id, "shift+tab");
+});
+
+test("F2 and SGR mouse reports are decoded", () => {
+  const { keys } = parseKeys("\x1bOQ\x1b[12~\x1b[<0;24;7M\x1b[<0;24;7m");
+  assert.deepEqual(keys.slice(0, 2).map((key) => key.name), ["f2", "f2"]);
+  assert.deepEqual(
+    { name: keys[2].name, x: keys[2].x, y: keys[2].y, button: keys[2].button, action: keys[2].mouseAction },
+    { name: "mouse", x: 24, y: 7, button: "left", action: "press" },
+  );
+  assert.equal(keys[3].mouseAction, "release");
 });
 
 test("all xterm modifier combinations are decoded from the encoded bitmask", () => {
@@ -207,8 +218,8 @@ test("up and down select slash commands before enter executes one", () => {
   ed.handle({ name: "up", id: "up" });
   assert.equal(ed.menuView(20).find((item) => item.selected)?.label, "/exit");
   ed.handle({ name: "down", id: "down" });
-  ed.handle({ name: "down", id: "down" });
-  ed.handle({ name: "down", id: "down" });
+  const contextIndex = ed.menu.findIndex((item) => item.value === "/context");
+  for (let i = 0; i < contextIndex; i++) ed.handle({ name: "down", id: "down" });
   assert.equal(ed.menuView(6).find((item) => item.selected)?.label, "/context");
   const action = ed.handle({ name: "enter", id: "enter" });
   assert.deepEqual(action, { type: "submit", text: "/context" });
@@ -354,13 +365,27 @@ test("the input viewport stays within height and keeps the cursor visible", () =
  * ------------------------------------------------------------------ */
 
 test("the command table is coherent", () => {
-  const names = ["help", "goal", "context", "compact", "model", "effort", "permission", "paste", "image", "tools", "notes", "session", "new", "exit"];
+  const names = ["help", "settings", "goal", "context", "compact", "model", "effort", "permission", "paste", "image", "tools", "notes", "session", "new", "exit"];
   for (const n of names) assert.ok(findCommand(n), `missing /${n}`);
   assert.equal(findCommand("?")?.name, "help");
   assert.equal(findCommand("permissions")?.name, "permission");
   assert.equal(findCommand("nope"), undefined);
   for (const c of commandCompletions("")) assert.ok(c.value.startsWith("/"));
   assert.deepEqual(PERMISSION_ORDER, ["auto", "ask", "readonly"]);
+});
+
+test("settings panel exposes keyboard rows and clickable values", () => {
+  const frame = renderSettings(
+    { contextWindow: 128_000, permission: "auto", effort: "high", showReasoning: false },
+    1,
+    80,
+    24,
+  );
+  assert.deepEqual(frame.rows.map((row) => row.key), ["permission", "context", "effort", "reasoning"]);
+  const contextHit = frame.hits.find((hit) => hit.row === 1 && hit.value === "256000");
+  assert.ok(contextHit);
+  assert.ok(contextHit.x1 <= contextHit.x2 && contextHit.y > 0);
+  assert.match(frame.lines.join("\n"), /raw settings/);
 });
 
 test("the context command accepts a user-defined token window", async () => {

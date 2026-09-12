@@ -256,8 +256,11 @@ agent 写给未来自己的持久文本 —— 某个站点的怪癖、某个项
 printf '检查这个项目\n列出主要风险' | raw
 ```
 
-会话内：`/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
+会话内：`/help` `/settings` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
+
+按 `F2` 或执行 `/settings` 打开全屏设置面板。支持 SGR 鼠标的终端可以直接点击按钮；
+所有终端也都可以使用方向键、Tab、Enter 和 Esc 完成同样的操作。
 
 `/context` 查看当前用量；`/context 256k` 修改当前会话的上下文长度。
 使用 `raw setup <provider> --context-window 256k ...` 保存该 provider 的默认值。

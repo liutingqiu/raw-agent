@@ -39,6 +39,7 @@ export type CommandContext = {
   attach: (image: ImagePart, label: string) => void;
   compact: (instructions?: string) => Promise<void>;
   usage: () => { used: number; total: number; images: number; turns: number };
+  openSettings: () => void;
   exit: () => void;
 };
 
@@ -76,6 +77,15 @@ export const commands: Command[] = [
       }
       ctx.print("");
       ctx.print(dim("  Esc stops generation · text selection copies as usual · Ctrl+G grabs a clipboard image"));
+    },
+  },
+
+  {
+    name: "settings",
+    args: "",
+    summary: "open the interactive settings panel (same as F2)",
+    run(ctx) {
+      ctx.openSettings();
     },
   },
 

@@ -43,6 +43,7 @@ import {
   theme,
 } from "./tui/theme.ts";
 import { Block, fitViewport, humanTokens, rule, Spinner, startupLines, statusLine, toolCallLine, toolResultLine } from "./tui/ui.ts";
+import { renderSettings, type SettingsHit, type SettingRow } from "./tui/settings.ts";
 import { firstLine, isInside, red, truncate, yellow } from "./util.ts";
 
 /** gateway errors arrive as pretty-printed JSON; collapse them onto one line */
@@ -198,7 +199,7 @@ function helpText(): string {
     keyReference(),
     "",
     paint("commands", bold, theme.info),
-    ...["help", "goal", "context", "compact", "model", "provider", "effort", "reasoning", "permission", "paste", "image", "tools", "notes", "session", "new", "exit"].map(
+    ...["help", "settings", "goal", "context", "compact", "model", "provider", "effort", "reasoning", "permission", "paste", "image", "tools", "notes", "session", "new", "exit"].map(
       (c) => `  ${paint("/" + c, theme.accent)}`,
     ),
     "",
@@ -587,6 +588,11 @@ async function main() {
   const CANCELLED_ANSWER = "\u0000cancelled";
   let asking: { editor: Editor; question: string; resolve: (s: string | null) => void; timer?: NodeJS.Timeout } | null = null;
   let lastResultText = "";
+  let settingsOpen = false;
+  let settingsRow = 0;
+  let settingsHits: SettingsHit[] = [];
+  let settingsRows: SettingRow[] = [];
+  let settingsCloseY = 0;
 
   const currentEditor = () => asking?.editor ?? editor;
 
@@ -595,6 +601,62 @@ async function main() {
     // turn append another stale copy of it
     block?.erase();
     process.stdout.write(s + "\n");
+  };
+
+  const drawSettings = () => {
+    if (!settingsOpen) return;
+    const frame = renderSettings(
+      { contextWindow: cfg.contextWindow, permission, effort: cfg.reasoningEffort, showReasoning },
+      settingsRow,
+      screen.width(),
+      screen.height(),
+    );
+    settingsHits = frame.hits;
+    settingsRows = frame.rows;
+    settingsCloseY = frame.closeY;
+    screen.hideCursor();
+    screen.clear();
+    out(frame.lines.join("\n"));
+  };
+
+  const applySetting = (rowIndex: number, value: string) => {
+    const row = settingsRows[rowIndex];
+    if (!row) return;
+    settingsRow = rowIndex;
+    if (row.key === "permission") permission = value as PermissionMode;
+    else if (row.key === "context") cfg = { ...cfg, contextWindow: Number(value) };
+    else if (row.key === "effort") cfg = { ...cfg, reasoningEffort: value === "default" ? undefined : value };
+    else if (row.key === "reasoning") showReasoning = value === "shown";
+    saveSession(sessionFile, messages, goal, cfg);
+    drawSettings();
+  };
+
+  const stepSetting = (delta: number) => {
+    const row = settingsRows[settingsRow];
+    if (!row?.choices.length) return;
+    const current = Math.max(0, row.choices.findIndex((choice) => choice.active));
+    const next = (current + delta + row.choices.length) % row.choices.length;
+    applySetting(settingsRow, row.choices[next].value);
+  };
+
+  const openSettings = () => {
+    if (settingsOpen) return;
+    block?.erase();
+    settingsOpen = true;
+    settingsRow = 0;
+    screen.enterAltScreen();
+    screen.enableMouse();
+    drawSettings();
+  };
+
+  const closeSettings = () => {
+    if (!settingsOpen) return;
+    screen.disableMouse();
+    screen.showCursor();
+    screen.leaveAltScreen();
+    settingsOpen = false;
+    settingsHits = [];
+    draw();
   };
 
   /* --------------------------- the prompt --------------------------- */
@@ -634,7 +696,7 @@ async function main() {
 
     const hint = busy
       ? `${dim(keyLabel("interrupt"))} stop`
-      : `${dim("/ commands")}  ${dim("@ files")}  ${dim("? help")}  ${dim(`${keyLabel("permission")} mode`)}`;
+      : `${dim("F2 settings")}  ${dim("/ commands")}  ${dim("@ files")}  ${dim(`${keyLabel("permission")} mode`)}`;
 
     const status = statusLine(
       {
@@ -943,6 +1005,11 @@ async function main() {
     if (restored) return;
     restored = true;
     spinner?.stop();
+    if (settingsOpen) {
+      screen.disableMouse();
+      screen.leaveAltScreen();
+      settingsOpen = false;
+    }
     block?.erase();
     screen.restore();
   };
@@ -968,9 +1035,31 @@ async function main() {
   const reader = new KeyReader((key) => {
     if (key.name === "resize" && key.cols && key.rows) {
       screen.noteReportedSize(key.cols, key.rows);
-      if (!busy || asking) {
+      if (settingsOpen) drawSettings();
+      else if (!busy || asking) {
         block?.erase();
         draw();
+      }
+      return;
+    }
+
+    if (settingsOpen) {
+      if (key.name === "escape" || key.name === "f2") closeSettings();
+      else if (key.name === "up") {
+        settingsRow = (settingsRow - 1 + settingsRows.length) % settingsRows.length;
+        drawSettings();
+      } else if (key.name === "down" || key.name === "tab") {
+        settingsRow = (settingsRow + 1) % settingsRows.length;
+        drawSettings();
+      } else if (key.name === "left") stepSetting(-1);
+      else if (key.name === "right") stepSetting(1);
+      else if (key.name === "enter") stepSetting(1);
+      else if (key.name === "mouse" && key.mouseAction === "press") {
+        if (key.y === settingsCloseY) closeSettings();
+        else {
+          const hit = settingsHits.find((candidate) => candidate.y === key.y && key.x! >= candidate.x1 && key.x! <= candidate.x2);
+          if (hit) applySetting(hit.row, hit.value);
+        }
       }
       return;
     }
@@ -990,6 +1079,11 @@ async function main() {
     // submissions. Escape and Ctrl+C remain responsive.
     if (busy) {
       if (key.id === "escape" || key.id === "ctrl+c") abort?.();
+      return;
+    }
+
+    if (key.name === "f2") {
+      openSettings();
       return;
     }
 
@@ -1046,8 +1140,11 @@ async function main() {
   process.stdout.on("resize", () => {
     const repaint = () => {
       screen.querySize(); // re-ask: the visible window may differ from the buffer
-      block?.erase();
-      draw();
+      if (settingsOpen) drawSettings();
+      else {
+        block?.erase();
+        draw();
+      }
     };
     repaint();
     // some terminals report the new column count a tick later
@@ -1115,6 +1212,7 @@ async function main() {
               images: messages.reduce((n, m) => n + (m.role !== "assistant" ? (m.images?.length ?? 0) : 0), 0),
               turns: messages.filter((m) => m.role === "assistant").length,
             }),
+            openSettings,
             exit: finish,
           },
           arg,
@@ -1124,7 +1222,8 @@ async function main() {
         printLine(red(`  /${name} failed: ${err instanceof Error ? err.message : String(err)}`));
       } finally {
         busy = false;
-        draw();
+        if (settingsOpen) drawSettings();
+        else draw();
       }
       return;
     }

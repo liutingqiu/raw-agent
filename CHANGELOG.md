@@ -8,9 +8,11 @@ follow Semantic Versioning.
 ### Added
 
 - Prompts can be supplied through piped stdin, including multiline input.
+- An F2 `/settings` panel provides clickable and keyboard-accessible controls for context, permission, reasoning effort, and reasoning display.
 
 ### Fixed
 
+- Mouse tracking is scoped to the settings panel so normal terminal selection and copying remain available.
 - Slash-command menus now execute the highlighted command with one Enter; Up and Down selection is covered end to end.
 - Context windows can be set per command, CLI invocation, environment, setup profile, or resumed session instead of relying on fallback constants.
 - Terminal editing now treats emoji, combining marks, and wrapped rows as complete visual units.

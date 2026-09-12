@@ -21,6 +21,8 @@ export type KeyName =
   | "end"
   | "pageup"
   | "pagedown"
+  | "f2"
+  | "mouse"
   | "paste"
   | "resize"
   | "unknown";
@@ -30,6 +32,10 @@ export type Key = {
   /** only set for name === "resize" (CSI 18 t reply) */
   cols?: number;
   rows?: number;
+  x?: number;
+  y?: number;
+  button?: "left" | "middle" | "right" | "wheel-up" | "wheel-down" | "other";
+  mouseAction?: "press" | "release" | "move";
   /** for name === "char" (may be a multi-byte character) or "paste" */
   text?: string;
   ctrl?: boolean;
@@ -98,6 +104,27 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
         continue;
       }
 
+      // SGR mouse reporting: ESC [ < button ; column ; row M/m
+      if (buf.startsWith("\x1b[<", i)) {
+        const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(buf.slice(i));
+        if (!mouse) return incomplete(i);
+        const code = Number(mouse[1]);
+        const base = code & 3;
+        const button = (code & 64) !== 0
+          ? (base === 0 ? "wheel-up" : "wheel-down")
+          : base === 0 ? "left" : base === 1 ? "middle" : base === 2 ? "right" : "other";
+        keys.push({
+          name: "mouse",
+          id: `mouse:${button}`,
+          x: Number(mouse[2]),
+          y: Number(mouse[3]),
+          button,
+          mouseAction: (code & 32) !== 0 ? "move" : mouse[4] === "m" ? "release" : "press",
+        });
+        i += mouse[0].length;
+        continue;
+      }
+
       if (next === "[") {
         // CSI: ESC [ params letter  /  ESC [ params ~
         let j = i + 2;
@@ -120,7 +147,7 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
         };
 
         if (final === "~") {
-          const name = CSI_TILDES[String(bits[0])] ?? "unknown";
+          const name = bits[0] === 12 ? "f2" : (CSI_TILDES[String(bits[0])] ?? "unknown");
           keys.push(make(name, mods));
           continue;
         }
@@ -143,7 +170,7 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
           keys.push({ name: "resize", id: "resize", rows: bits[1], cols: bits[2] });
           continue;
         }
-        const name = CSI_LETTERS[final];
+        const name = final === "Q" ? "f2" : CSI_LETTERS[final];
         if (name) {
           keys.push(make(name, mods));
           continue;
@@ -156,7 +183,7 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
         // SS3: ESC O A..D (application cursor keys)
         const final = buf[i + 2];
         if (final === undefined) return incomplete(i);
-        const name = CSI_LETTERS[final];
+        const name = final === "Q" ? "f2" : CSI_LETTERS[final];
         keys.push(name ? make(name) : make("unknown"));
         i += 3;
         continue;
@@ -281,6 +308,24 @@ export const screen = {
   },
   moveTo(col: number) {
     out(`\x1b[${Math.max(1, col)}G`);
+  },
+  position(row: number, col = 1) {
+    out(`\x1b[${Math.max(1, row)};${Math.max(1, col)}H`);
+  },
+  clear() {
+    out("\x1b[2J\x1b[H");
+  },
+  enterAltScreen() {
+    out("\x1b[?1049h");
+  },
+  leaveAltScreen() {
+    out("\x1b[?1049l");
+  },
+  enableMouse() {
+    out("\x1b[?1000h\x1b[?1006h");
+  },
+  disableMouse() {
+    out("\x1b[?1006l\x1b[?1000l");
   },
   /**
    * On Windows, stdout.columns is the *screen buffer* width, which can be much

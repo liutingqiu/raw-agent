@@ -144,6 +144,7 @@ export type Binding = {
 
 export const bindings: Binding[] = [
   { id: "submit", win: "Enter", mac: "Enter", linux: "Enter", what: "send", match: ["enter"] },
+  { id: "settings", win: "F2", mac: "F2", linux: "F2", what: "open interactive settings", match: ["f2"] },
   {
     id: "newline",
     win: "Ctrl+J / Shift+Enter",
