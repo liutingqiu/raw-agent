@@ -83,7 +83,18 @@ export type ResolveOptions = {
   apiKey?: string;
   api?: string;
   reasoningEffort?: string;
+  contextWindow?: number;
 };
+
+export function parseTokenCount(value: string | number | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 1_024 && value <= 100_000_000 ? value : undefined;
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([km])?$/);
+  if (!match) return undefined;
+  const scale = match[2] === "k" ? 1_000 : match[2] === "m" ? 1_000_000 : 1;
+  const parsed = Number(match[1]) * scale;
+  return Number.isSafeInteger(parsed) && parsed >= 1_024 && parsed <= 100_000_000 ? parsed : undefined;
+}
 
 const configuredApiResponseBytes = Number(process.env.RAW_MAX_API_RESPONSE_BYTES);
 const MAX_API_RESPONSE_BYTES = Number.isFinite(configuredApiResponseBytes) && configuredApiResponseBytes > 0
@@ -161,6 +172,11 @@ export function resolveConfig(opts: ResolveOptions): AgentConfig {
   const meta = preset?.models.find((m) => m.id === model) ?? piP?.models?.find((m) => m.id === model);
 
   const effort = opts.reasoningEffort ?? process.env.RAW_REASONING_EFFORT ?? mapEffort(process.env.PI_REASONING_LEVEL);
+  const rawContextWindow = opts.contextWindow === undefined ? process.env.RAW_CONTEXT_WINDOW : undefined;
+  const envContextWindow = parseTokenCount(rawContextWindow);
+  if (rawContextWindow !== undefined && envContextWindow === undefined) {
+    throw new Error("RAW_CONTEXT_WINDOW must be between 1024 and 100m tokens (for example 128k or 1m)");
+  }
 
   const isAnthropic = api === "anthropic-messages";
   const isLocal = isLocalEndpoint(baseUrl);
@@ -187,7 +203,7 @@ export function resolveConfig(opts: ResolveOptions): AgentConfig {
     apiKey,
     api,
     reasoning: meta?.reasoning ?? !isAnthropic,
-    contextWindow: meta?.contextWindow ?? (isAnthropic ? 200_000 : 128_000),
+    contextWindow: opts.contextWindow ?? envContextWindow ?? storedP?.contextWindow ?? meta?.contextWindow ?? (isAnthropic ? 200_000 : 128_000),
     maxTokens: meta?.maxTokens ?? (isAnthropic ? 32_000 : 32_000),
     reasoningEffort: effort,
   };

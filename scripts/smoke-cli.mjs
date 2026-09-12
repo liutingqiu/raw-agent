@@ -106,6 +106,7 @@ try {
       "--base-url", `http://127.0.0.1:${address.port}/v1`,
       "--api-key", "test-key",
       "--api", "openai-completions",
+      "--context-window", "256k",
       "--max-turns", "4",
     ],
     childOptions(workspace),
@@ -119,6 +120,7 @@ try {
   assert.equal(sessions.length, 1);
   const saved = JSON.parse(fs.readFileSync(path.join(home, "sessions", sessions[0]), "utf8"));
   assert.equal(saved.messages.at(-1).content, "smoke complete");
+  assert.equal(saved.contextWindow, 256_000);
 
   const resumed = await run(process.execPath, [cli, "-c", "-p", "resume this session"], childOptions(workspace));
   assert.equal(resumed.code, 0, resumed.stderr || resumed.stdout);

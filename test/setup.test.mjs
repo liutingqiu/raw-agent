@@ -47,3 +47,10 @@ test("setup rejects an invalid URL before attempting model discovery", async () 
   assert.match(result.output, /invalid base URL/);
   assert.doesNotMatch(result.output, /verifying/);
 });
+
+test("setup rejects an invalid context window before network access", async () => {
+  const result = await captureSetup(["ollama", "--context-window", "too-large"]);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.output, /--context-window/);
+  assert.doesNotMatch(result.output, /verifying/);
+});

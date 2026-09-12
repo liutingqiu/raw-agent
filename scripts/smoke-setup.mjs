@@ -59,13 +59,14 @@ try {
   if (!address || typeof address === "string") throw new Error("could not start setup smoke server");
   const base = `http://127.0.0.1:${address.port}/v1`;
 
-  const setup = await run(["setup", "custom-smoke", "--base-url", base, "--api", "openai-completions", "--key", secret, "--model", "model-b"]);
+  const setup = await run(["setup", "custom-smoke", "--base-url", base, "--api", "openai-completions", "--key", secret, "--model", "model-b", "--context-window", "512k"]);
   assert.equal(setup.code, 0, setup.stderr || setup.stdout);
   assert.match(setup.stdout, /2 models available/);
   const config = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
   assert.equal(config.active.provider, "custom-smoke");
   assert.equal(config.active.model, "model-b");
   assert.equal(config.providers["custom-smoke"].apiKey, secret);
+  assert.equal(config.providers["custom-smoke"].contextWindow, 512_000);
 
   const listed = await run(["providers"]);
   assert.equal(listed.code, 0, listed.stderr || listed.stdout);

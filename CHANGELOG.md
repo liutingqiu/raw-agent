@@ -11,6 +11,8 @@ follow Semantic Versioning.
 
 ### Fixed
 
+- Slash-command menus now execute the highlighted command with one Enter; Up and Down selection is covered end to end.
+- Context windows can be set per command, CLI invocation, environment, setup profile, or resumed session instead of relying on fallback constants.
 - Terminal editing now treats emoji, combining marks, and wrapped rows as complete visual units.
 - Modified Enter, Tab, Backspace, and arrow keys are decoded consistently across xterm and Kitty keyboard protocols.
 - Narrow and short terminals keep prompts, completion menus, status lines, and permission questions inside the viewport.

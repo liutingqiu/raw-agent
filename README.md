@@ -275,6 +275,7 @@ logged into your accounts.** That is the point, and it is also the risk.
 | `--provider <name>` | Configured provider or built-in preset |
 | `--base-url` `--api-key` `--api` | Override connection details (`openai-completions`, `openai-responses`, `anthropic-messages`) |
 | `--effort <level>` | `minimal` / `low` / `medium` / `high` / `xhigh` / `max` (provider support varies) |
+| `--context-window <tokens>` | Override the model context size (`128k`, `1m`, or an integer) |
 | `--show-reasoning` | Stream the model's thinking (hidden by default; `/reasoning` toggles it live) |
 | `--confirm` | Ask before every side effect |
 | `--permission <mode>` | `auto` / `ask` / `readonly` (default `auto`) |
@@ -292,6 +293,9 @@ printf 'inspect this project\nand list the risks' | raw
 In-session: `/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
 
+`/context` shows current usage; `/context 256k` changes the context window for the current session.
+Use `raw setup <provider> --context-window 256k ...` to save a provider-level default.
+
 Use `Ctrl+J` or `Shift+Enter` for a newline, `Shift+Tab` to cycle permission modes, and `Esc` or
 `Ctrl+C` to stop an active request or tool. On an empty input line, Backspace removes the latest
 image attachment.
@@ -304,6 +308,7 @@ image attachment.
 | `RAW_NO_PROXY=1` | Disable the local-proxy auto-detection |
 | `RAW_HOME` | Move the data directory |
 | `RAW_MODEL` `RAW_API_KEY` `RAW_BASE_URL` `RAW_API` `RAW_PROVIDER` | Per-run overrides |
+| `RAW_CONTEXT_WINDOW` | Override the model context size (`128k`, `1m`, or an integer) |
 | `RAW_ALLOW_OUTSIDE=1` | Allow file paths outside the workspace |
 | `RAW_DEBUG=1` | Print the outgoing request body |
 | `RAW_REASONING_EFFORT` | Override reasoning effort |

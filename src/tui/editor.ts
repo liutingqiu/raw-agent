@@ -338,13 +338,13 @@ export class Editor {
   }
 
   /** replace the current token with the highlighted completion */
-  acceptCompletion(): boolean {
+  acceptCompletion(appendCommandSpace = true): boolean {
     if (!this.menu.length) return false;
     const { kind, start } = this.currentToken();
     const value = this.menu[this.menuIndex].value;
     const line = this.line();
     const end = this.col;
-    const insert = kind === "command" ? value + " " : value;
+    const insert = kind === "command" && appendCommandSpace ? value + " " : value;
     this.setLine(line.slice(0, start) + insert + line.slice(end));
     this.col = start + insert.length;
     this.resetVertical();
@@ -366,15 +366,11 @@ export class Editor {
       return null;
     }
 
-    // A fully typed command should run on the first Enter. Partial entries can
-    // still use Enter or Tab to accept the highlighted completion.
+    // Enter executes the highlighted slash command immediately. Tab only
+    // completes it, leaving the cursor ready for arguments.
     if (this.menu.length && key.id === "enter" && this.menuKind === "command") {
-      const { start } = this.currentToken();
-      if (this.line().slice(start, this.col) === this.menu[this.menuIndex].value) {
-        this.menu = [];
-        this.menuKind = null;
-        return this.submit();
-      }
+      this.acceptCompletion(false);
+      return this.submit();
     }
 
     // A menu key first: Enter accepts rather than submits.

@@ -7,7 +7,7 @@ import { bold, cyan, dim, green, red, yellow } from "./util.ts";
 import { PRESETS, findPreset, type Preset } from "./presets.ts";
 import { maskKey, readConfig, removeProvider, setActive, setProvider, CONFIG_FILE } from "./paths.ts";
 import { makeAsker, choose, type Asker } from "./input.ts";
-import { isLocalEndpoint, type ApiKind } from "./api.ts";
+import { isLocalEndpoint, parseTokenCount, type ApiKind } from "./api.ts";
 
 export type Endpoint = { baseUrl: string; api: ApiKind; apiKey: string };
 
@@ -123,7 +123,7 @@ export function printProviders(verbose = false) {
  * ------------------------------------------------------------------ */
 
 function parseSetupArgs(argv: string[]) {
-  const o: { provider?: string; key?: string; model?: string; baseUrl?: string; api?: string; list?: boolean } = {};
+  const o: { provider?: string; key?: string; model?: string; baseUrl?: string; api?: string; contextWindow?: string; list?: boolean } = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const value = () => {
@@ -135,6 +135,7 @@ function parseSetupArgs(argv: string[]) {
     else if (a === "--model" || a === "-m") o.model = value();
     else if (a === "--base-url") o.baseUrl = value();
     else if (a === "--api") o.api = value();
+    else if (a === "--context-window") o.contextWindow = value();
     else if (a === "--list") o.list = true;
     else if (!a.startsWith("-")) o.provider ??= a;
     else throw new Error(`unknown setup option: ${a}`);
@@ -148,6 +149,12 @@ export async function runSetup(argv: string[]): Promise<void> {
     opts = parseSetupArgs(argv);
   } catch (err) {
     console.error(red(err instanceof Error ? err.message : String(err)));
+    process.exitCode = 2;
+    return;
+  }
+  const requestedContextWindow = parseTokenCount(opts.contextWindow);
+  if (opts.contextWindow !== undefined && requestedContextWindow === undefined) {
+    console.error(red("--context-window must be between 1024 and 100m tokens (for example 128k or 1m)"));
     process.exitCode = 2;
     return;
   }
@@ -295,11 +302,13 @@ export async function runSetup(argv: string[]): Promise<void> {
     }
     const existing = storedProvider?.models ?? [];
     const models = [model, ...existing.filter((m) => m !== model), ...fallback.filter((m) => m !== model)].slice(0, 12);
+    const contextWindow = requestedContextWindow ?? storedProvider?.contextWindow;
 
-    setProvider(name, { apiKey: keyFromEnv ? storedProvider?.apiKey : (apiKey || undefined), baseUrl, api, models });
+    setProvider(name, { apiKey: keyFromEnv ? storedProvider?.apiKey : (apiKey || undefined), baseUrl, api, models, contextWindow });
     setActive(name, model);
 
     console.log(`\n${green("✔")} saved ${cyan(name)} → ${cyan(model)}`);
+    if (contextWindow) console.log(dim(`  context window: ${contextWindow.toLocaleString("en-US")} tokens`));
     console.log(dim(`  ${CONFIG_FILE}`));
     console.log(dim(`  run:  raw            (or)  raw -m ${model}`));
     if (preset?.env && !process.env[preset.env]) {

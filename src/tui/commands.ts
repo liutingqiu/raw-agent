@@ -6,7 +6,7 @@
  */
 import { bindings, bold, dim, glyph, isMac, isWindows, keyLabel, paint, theme } from "./theme.ts";
 import { humanTokens, meter } from "./ui.ts";
-import type { AgentConfig, Msg } from "../api.ts";
+import { parseTokenCount, type AgentConfig, type Msg } from "../api.ts";
 import { PRESETS, findPreset } from "../presets.ts";
 import { CONFIG_FILE, SESSION_DIR, maskKey, readConfig } from "../paths.ts";
 import type { ImagePart } from "../tools.ts";
@@ -100,9 +100,19 @@ export const commands: Command[] = [
 
   {
     name: "context",
-    args: "",
-    summary: "what is actually in the window right now",
-    run(ctx) {
+    args: "[tokens]",
+    summary: "inspect or set the context window (for example /context 128k)",
+    run(ctx, arg) {
+      if (arg) {
+        const contextWindow = parseTokenCount(arg);
+        if (contextWindow === undefined) {
+          ctx.print(paint(`invalid context window "${arg}" — use 128k, 1m, or a token count`, theme.warn));
+          return;
+        }
+        ctx.setConfig({ ...ctx.cfg, contextWindow });
+        ctx.print(`${glyph.check} context window ${dim("→")} ${paint(contextWindow.toLocaleString("en-US"), theme.accent)} tokens`);
+        return;
+      }
       const { used, total, images, turns } = ctx.usage();
       const w = Math.max(20, ctx.width() - 8);
       const byRole: Record<string, { n: number; chars: number }> = {};

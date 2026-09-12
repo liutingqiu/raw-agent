@@ -241,6 +241,7 @@ agent 写给未来自己的持久文本 —— 某个站点的怪癖、某个项
 | `--provider <name>` | 已配置 provider 或内置预设 |
 | `--base-url` `--api-key` `--api` | 覆盖连接信息（`openai-completions` / `openai-responses` / `anthropic-messages`） |
 | `--effort <level>` | `minimal` / `low` / `medium` / `high` / `xhigh` / `max`（视 provider 支持） |
+| `--context-window <tokens>` | 覆盖模型上下文长度（`128k`、`1m` 或整数） |
 | `--show-reasoning` | 显示模型的思考过程（默认隐藏，会话里用 `/reasoning` 开关） |
 | `--confirm` | 每个副作用前询问 |
 | `--permission <mode>` | `auto` / `ask` / `readonly`（默认 `auto`） |
@@ -258,6 +259,9 @@ printf '检查这个项目\n列出主要风险' | raw
 会话内：`/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
 
+`/context` 查看当前用量；`/context 256k` 修改当前会话的上下文长度。
+使用 `raw setup <provider> --context-window 256k ...` 保存该 provider 的默认值。
+
 用 `Ctrl+J` 或 `Shift+Enter` 输入换行，`Shift+Tab` 切换权限模式，`Esc` 或 `Ctrl+C`
 中止正在执行的请求或工具。输入为空时，Backspace 会移除最后一张图片附件。
 
@@ -269,6 +273,7 @@ printf '检查这个项目\n列出主要风险' | raw
 | `RAW_NO_PROXY=1` | 关闭本地代理端口自动探测 |
 | `RAW_HOME` | 更换数据目录 |
 | `RAW_MODEL` `RAW_API_KEY` `RAW_BASE_URL` `RAW_API` `RAW_PROVIDER` | 单次覆盖 |
+| `RAW_CONTEXT_WINDOW` | 覆盖模型上下文长度（`128k`、`1m` 或整数） |
 | `RAW_ALLOW_OUTSIDE=1` | 允许访问工作区外路径 |
 | `RAW_DEBUG=1` | 打印发出的请求体 |
 | `RAW_REASONING_EFFORT` | 覆盖推理强度 |

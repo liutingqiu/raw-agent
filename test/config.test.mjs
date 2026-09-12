@@ -13,9 +13,10 @@ delete process.env.RAW_PROVIDER;
 delete process.env.RAW_MODEL;
 delete process.env.RAW_BASE_URL;
 delete process.env.RAW_API_KEY;
+delete process.env.RAW_CONTEXT_WINDOW;
 
 const { writeConfig, readConfig, maskKey, removeProvider, setProvider } = await import("../src/paths.ts");
-const { resolveConfig } = await import("../src/api.ts");
+const { parseTokenCount, resolveConfig } = await import("../src/api.ts");
 
 writeConfig({
   providers: {
@@ -121,6 +122,42 @@ test("a key is required unless the endpoint is local", () => {
 test("config source is reported honestly", () => {
   assert.equal(resolveConfig({ provider: "openai", model: "m", apiKey: "k" }).source, "flags");
   assert.equal(resolveConfig({}).source === "config" || resolveConfig({}).source === "pi", true);
+});
+
+test("context windows accept readable user overrides", () => {
+  assert.equal(parseTokenCount("128k"), 128_000);
+  assert.equal(parseTokenCount("1.05m"), 1_050_000);
+  assert.equal(parseTokenCount("1000"), undefined);
+  assert.equal(resolveConfig({ contextWindow: 256_000 }).contextWindow, 256_000);
+  process.env.RAW_CONTEXT_WINDOW = "512k";
+  try {
+    assert.equal(resolveConfig({}).contextWindow, 512_000);
+  } finally {
+    delete process.env.RAW_CONTEXT_WINDOW;
+  }
+});
+
+test("a provider can persist its user-selected context window", () => {
+  setProvider("context-provider", {
+    baseUrl: "http://127.0.0.1:11434/v1",
+    models: ["context-model"],
+    contextWindow: 750_000,
+  });
+  try {
+    assert.equal(resolveConfig({ provider: "context-provider", model: "context-model" }).contextWindow, 750_000);
+  } finally {
+    removeProvider("context-provider");
+  }
+});
+
+test("invalid context window environment values fail clearly", () => {
+  process.env.RAW_CONTEXT_WINDOW = "huge";
+  try {
+    assert.throws(() => resolveConfig({}), /RAW_CONTEXT_WINDOW/);
+    assert.equal(resolveConfig({ contextWindow: 300_000 }).contextWindow, 300_000);
+  } finally {
+    delete process.env.RAW_CONTEXT_WINDOW;
+  }
 });
 
 test("provider names cannot collide with object prototype keys", () => {

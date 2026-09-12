@@ -187,18 +187,31 @@ test("history navigation restores the draft", () => {
   assert.equal(ed.text(), "draft");
 });
 
-test("command completion fills the token and enter accepts it", () => {
+test("enter executes the highlighted slash command in one step", () => {
   const ed = new Editor();
   ed.completer = (token, kind) => (kind === "command" ? commandCompletions(token) : []);
   type(ed, "/mo");
   ed.refreshMenu();
   assert.ok(ed.menu.length >= 1);
   assert.equal(ed.menu[0].value, "/model");
-  ed.handle({ name: "enter", id: "enter" });
-  assert.equal(ed.text(), "/model ");
-  // the menu is closed now, so enter actually submits
   const action = ed.handle({ name: "enter", id: "enter" });
   assert.equal(action?.type, "submit");
+  assert.equal(action?.type === "submit" && action.text, "/model");
+});
+
+test("up and down select slash commands before enter executes one", () => {
+  const ed = new Editor();
+  ed.completer = (token, kind) => (kind === "command" ? commandCompletions(token) : []);
+  type(ed, "/");
+  assert.ok(ed.menu.length > 3);
+  ed.handle({ name: "up", id: "up" });
+  assert.equal(ed.menuView(20).find((item) => item.selected)?.label, "/exit");
+  ed.handle({ name: "down", id: "down" });
+  ed.handle({ name: "down", id: "down" });
+  ed.handle({ name: "down", id: "down" });
+  assert.equal(ed.menuView(6).find((item) => item.selected)?.label, "/context");
+  const action = ed.handle({ name: "enter", id: "enter" });
+  assert.deepEqual(action, { type: "submit", text: "/context" });
 });
 
 test("escape closes the completion menu instead of interrupting", () => {
@@ -348,6 +361,24 @@ test("the command table is coherent", () => {
   assert.equal(findCommand("nope"), undefined);
   for (const c of commandCompletions("")) assert.ok(c.value.startsWith("/"));
   assert.deepEqual(PERMISSION_ORDER, ["auto", "ask", "readonly"]);
+});
+
+test("the context command accepts a user-defined token window", async () => {
+  let cfg = { provider: "p", model: "m", contextWindow: 128_000 };
+  const output = [];
+  const command = findCommand("context");
+  await command.run({
+    cfg,
+    setConfig(next) { cfg = next; },
+    messages: [],
+    permission: "auto",
+    showReasoning: false,
+    goal: null,
+    sessionFile: "session.json",
+    print(line = "") { output.push(line); },
+  }, "1m");
+  assert.equal(cfg.contextWindow, 1_000_000);
+  assert.match(output.join("\n"), /1,000,000/);
 });
 
 /* ------------------------------------------------------------------ *

@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import {
   isRetryable,
+  parseTokenCount,
   resolveConfig,
   streamTurn,
   type AgentConfig,
@@ -73,6 +74,7 @@ type Options = {
   apiKey?: string;
   api?: string;
   reasoningEffort?: string;
+  contextWindow?: number;
   permission?: PermissionMode;
   cont: boolean;
   session?: string;
@@ -119,6 +121,12 @@ function parseArgs(argv: string[]): Options {
       case "--reasoning-effort":
         o.reasoningEffort = next();
         break;
+      case "--context-window": {
+        const value = next();
+        o.contextWindow = parseTokenCount(value);
+        if (o.contextWindow === undefined) fail("--context-window must be between 1024 and 100m tokens (for example 128k or 1m)");
+        break;
+      }
       case "--confirm":
         o.permission = "ask";
         break;
@@ -181,6 +189,7 @@ function helpText(): string {
     `  ${label("--provider")}configured provider or built-in preset`,
     `  ${label("--base-url")}${dim("--api-key  --api   override connection details")}`,
     `  ${label("--effort")}minimal | low | medium | high | xhigh | max`,
+    `  ${label("--context-window")}model context size, e.g. 128k or 1m`,
     `  ${label("--permission")}auto | ask | readonly (default auto)`,
     `  ${label("--show-reasoning")}stream the model's thinking (hidden by default)`,
     `  ${label("-c, --continue")}resume this workspace's most recent session`,
@@ -199,6 +208,7 @@ function helpText(): string {
     `  ${label("RAW_DEBUG")}print the outgoing request body`,
     `  ${label("RAW_ALLOW_OUTSIDE")}allow file paths outside the workspace`,
     `  ${label("RAW_NO_IMAGES")}never attach screenshots to the model`,
+    `  ${label("RAW_CONTEXT_WINDOW ")}override the model context size`,
     "",
     dim(`  data: ${CONFIG_DIR}`),
   ];
@@ -215,6 +225,7 @@ type SessionFile = {
   model?: string;
   provider?: string;
   reasoningEffort?: string;
+  contextWindow?: number;
   cwd?: string;
 };
 
@@ -228,6 +239,7 @@ function saveSession(file: string, messages: Msg[], goal: string | null, cfg: Ag
       model: cfg.model,
       provider: cfg.provider,
       reasoningEffort: cfg.reasoningEffort,
+      contextWindow: cfg.contextWindow,
       cwd: process.cwd(),
     };
     writeJsonAtomic(file, payload);
@@ -287,10 +299,21 @@ function loadSession(file: string): SessionFile {
       for (const field of ["model", "provider", "reasoningEffort", "cwd"] as const) {
         if (raw[field] !== undefined && typeof raw[field] !== "string") throw new Error(`${field} must be a string`);
       }
+      if (raw.contextWindow !== undefined && parseTokenCount(raw.contextWindow) === undefined) {
+        throw new Error("contextWindow must be an integer between 1024 and 100000000");
+      }
     }
     return Array.isArray(raw)
       ? { messages, goal: null }
-      : { messages, goal: raw.goal ?? null, model: raw.model, provider: raw.provider, reasoningEffort: raw.reasoningEffort, cwd: raw.cwd };
+      : {
+          messages,
+          goal: raw.goal ?? null,
+          model: raw.model,
+          provider: raw.provider,
+          reasoningEffort: raw.reasoningEffort,
+          contextWindow: raw.contextWindow,
+          cwd: raw.cwd,
+        };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { messages: [], goal: null };
     throw new Error(`could not load session ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -500,6 +523,7 @@ async function main() {
     apiKey: opts.apiKey,
     api: opts.api,
     reasoningEffort: opts.reasoningEffort ?? (!process.env.RAW_REASONING_EFFORT ? session?.reasoningEffort : undefined),
+    contextWindow: opts.contextWindow ?? (!process.env.RAW_CONTEXT_WINDOW ? session?.contextWindow : undefined),
   });
   let cfg = resolveForSession();
   let showReasoning = opts.showReasoning;
@@ -1095,7 +1119,7 @@ async function main() {
           },
           arg,
         );
-        if (["goal", "new", "model", "provider", "effort"].includes(name)) saveSession(sessionFile, messages, goal, cfg);
+        if (["goal", "new", "model", "provider", "effort", "context"].includes(name)) saveSession(sessionFile, messages, goal, cfg);
       } catch (err) {
         printLine(red(`  /${name} failed: ${err instanceof Error ? err.message : String(err)}`));
       } finally {

@@ -75,6 +75,8 @@ export type StoredProvider = {
   label?: string;
   /** model ids the user picked, most-preferred first */
   models?: string[];
+  /** user override for the model's context window */
+  contextWindow?: number;
 };
 
 export type StoredConfig = {
@@ -101,6 +103,10 @@ export function readConfig(): StoredConfig {
       }
       if (provider.models !== undefined && (!Array.isArray(provider.models) || provider.models.some((m: unknown) => typeof m !== "string"))) {
         throw new Error(`provider ${name}.models must be an array of strings`);
+      }
+      if (provider.contextWindow !== undefined &&
+          (!Number.isSafeInteger(provider.contextWindow) || provider.contextWindow < 1_024 || provider.contextWindow > 100_000_000)) {
+        throw new Error(`provider ${name}.contextWindow must be an integer between 1024 and 100000000`);
       }
     }
     raw.providers = Object.assign(Object.create(null), raw.providers ?? {});
