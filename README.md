@@ -283,8 +283,18 @@ logged into your accounts.** That is the point, and it is also the risk.
 | `--session <file>` | Session file to use |
 | `--max-turns <n>` | Tool-loop turns per message (default 64) |
 
+Without `-p`, redirected stdin is read as one prompt, including embedded newlines:
+
+```bash
+printf 'inspect this project\nand list the risks' | raw
+```
+
 In-session: `/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
+
+Use `Ctrl+J` or `Shift+Enter` for a newline, `Shift+Tab` to cycle permission modes, and `Esc` or
+`Ctrl+C` to stop an active request or tool. On an empty input line, Backspace removes the latest
+image attachment.
 
 ### Environment
 

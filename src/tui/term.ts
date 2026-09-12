@@ -109,10 +109,14 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
 
         const bits = params.split(";").map((p) => Number(p.split(":")[0]));
         const modifier = bits.length > 1 ? bits[1] : undefined;
+        // XTerm/kitty encode modifiers as 1 + a bitmask:
+        // Shift=1, Alt=2, Ctrl=4. Testing the encoded number itself loses
+        // combinations such as 4 (Shift+Alt) and 8 (all three modifiers).
+        const modifierBits = modifier === undefined ? 0 : Math.max(0, modifier - 1);
         const mods = {
-          shift: modifier !== undefined && [2, 4, 6, 8].includes(modifier) && modifier % 2 === 0,
-          alt: modifier !== undefined && [3, 4, 7, 8].includes(modifier) && (modifier & 2) !== 0,
-          ctrl: modifier !== undefined && [5, 6, 7, 8].includes(modifier) && (modifier & 4) !== 0,
+          shift: (modifierBits & 1) !== 0,
+          alt: (modifierBits & 2) !== 0,
+          ctrl: (modifierBits & 4) !== 0,
         };
 
         if (final === "~") {
@@ -127,8 +131,11 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
         if (final === "u") {
           // kitty keyboard protocol: ESC [ codepoint ; modifier u
           const code = bits[0] || 0;
-          const text = String.fromCodePoint(code);
-          keys.push(make("char", { text, ...mods }));
+          if (code === 13) keys.push(make("enter", mods));
+          else if (code === 9) keys.push(make("tab", mods));
+          else if (code === 127 || code === 8) keys.push(make("backspace", mods));
+          else if (code === 27) keys.push(make("escape", mods));
+          else keys.push(make("char", { text: String.fromCodePoint(code), ...mods }));
           continue;
         }
         // CSI 8 ; rows ; cols t — the terminal answering our window-size query
@@ -162,6 +169,11 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
         i += 2;
         continue;
       }
+      if (plain === "\x7f" || plain === "\x08") {
+        keys.push(make("backspace", { alt: true }));
+        i += 2;
+        continue;
+      }
       if (plain >= " " && plain !== "\x7f") {
         keys.push(make("char", { text: plain, alt: true }));
         i += 2;
@@ -174,8 +186,15 @@ export function parseKeys(buf: string): { keys: Key[]; rest: string } {
 
     /* ------------------------------ control ------------------------------ */
     const code = ch.charCodeAt(0);
-    if (ch === "\r" || ch === "\n") {
+    if (ch === "\r") {
       keys.push(make("enter"));
+      i++;
+      continue;
+    }
+    // In raw terminal mode Enter is CR while Ctrl+J is LF. Keeping them
+    // distinct makes the documented multiline shortcut actually work.
+    if (ch === "\n") {
+      keys.push(make("char", { text: "j", ctrl: true }));
       i++;
       continue;
     }
@@ -280,10 +299,11 @@ export const screen = {
     if (isTTY) out("[18t");
   },
   noteReportedSize(cols: number, rows: number) {
-    if (cols >= 20) reportedSize = { cols, rows };
+    if (cols >= 8 && rows >= 3) reportedSize = { cols, rows };
   },
   height(): number {
-    return process.stdout.rows || 24;
+    const fromBuffer = process.stdout.rows || 24;
+    return reportedSize ? Math.min(fromBuffer, reportedSize.rows) : fromBuffer;
   },
   /** query whether the terminal wants to hand paste through bracketed mode */
   enableBracketedPaste() {
@@ -311,16 +331,39 @@ export const screen = {
   },
 };
 
-/** display width, ignoring ANSI escapes and counting CJK as two cells */
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Split text at user-perceived character boundaries while retaining UTF-16 offsets. */
+export function graphemes(s: string): { text: string; start: number; end: number }[] {
+  return [...graphemeSegmenter.segment(s)].map(({ segment, index }) => ({
+    text: segment,
+    start: index,
+    end: index + segment.length,
+  }));
+}
+
+function graphemeWidth(s: string): number {
+  // Joined emoji, flags and emoji presentation sequences occupy one two-cell
+  // glyph even though they contain several code points.
+  if (/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(s)) return 2;
+  let width = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!;
+    if (
+      cp === 0x200d ||
+      (cp >= 0xfe00 && cp <= 0xfe0f) ||
+      (cp >= 0x1f3fb && cp <= 0x1f3ff) ||
+      /\p{Mark}/u.test(ch)
+    ) continue;
+    width += isWide(cp) ? 2 : 1;
+  }
+  return width;
+}
+
+/** display width, ignoring ANSI escapes and counting terminal grapheme cells */
 export function displayWidth(s: string): number {
   const plain = s.replace(/\x1b\[[0-9;:?]*[a-zA-Z]|\x1b[78]|\x1b\[<u|\x1b\[>1u/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
-  let w = 0;
-  for (const ch of plain) {
-    const cp = ch.codePointAt(0)!;
-    if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
-    w += isWide(cp) ? 2 : 1;
-  }
-  return w;
+  return graphemes(plain).reduce((width, part) => width + graphemeWidth(part.text), 0);
 }
 
 function isWide(cp: number): boolean {
@@ -345,10 +388,10 @@ export function clip(s: string, width: number): string {
   let out2 = "";
   let w = 0;
   const target = Math.max(0, width - 1);
-  for (const ch of plain) {
-    const cw = isWide(ch.codePointAt(0)!) ? 2 : 1;
+  for (const part of graphemes(plain)) {
+    const cw = graphemeWidth(part.text);
     if (w + cw > target) break;
-    out2 += ch;
+    out2 += part.text;
     w += cw;
   }
   return out2 + "…";

@@ -4,6 +4,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const { runSetup } = await import("../src/setup.ts");
+const { choose } = await import("../src/input.ts");
+
+test("numbered menus accept an exact item name", async () => {
+  const ask = {
+    question: async () => "model-beta",
+    secret: async () => "",
+    atEof: () => false,
+    close() {},
+  };
+  const picked = await choose(ask, ["model-alpha", "model-beta"], (item) => item);
+  assert.equal(picked, "model-beta");
+});
 
 async function captureSetup(argv) {
   const lines = [];

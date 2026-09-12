@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import {
   isRetryable,
   resolveConfig,
@@ -40,7 +41,7 @@ import {
   platformName,
   theme,
 } from "./tui/theme.ts";
-import { Block, humanTokens, rule, Spinner, startupLines, statusLine, toolCallLine, toolResultLine } from "./tui/ui.ts";
+import { Block, fitViewport, humanTokens, rule, Spinner, startupLines, statusLine, toolCallLine, toolResultLine } from "./tui/ui.ts";
 import { firstLine, isInside, red, truncate, yellow } from "./util.ts";
 
 /** gateway errors arrive as pretty-printed JSON; collapse them onto one line */
@@ -236,6 +237,19 @@ function saveSession(file: string, messages: Msg[], goal: string | null, cfg: Ag
   }
 }
 
+async function readPipedPrompt(): Promise<string> {
+  const limit = 8 * 1024 * 1024;
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of process.stdin as unknown as AsyncIterable<Buffer | string>) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.length;
+    if (total > limit) throw new Error(`stdin prompt exceeds ${limit} bytes`);
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, total).toString("utf8").trim();
+}
+
 function loadSession(file: string): SessionFile {
   try {
     const size = fs.statSync(file).size;
@@ -370,6 +384,7 @@ async function executeCalls(calls: ToolCall[], ctx: ToolContext, runner: Runner)
 
   let i = 0;
   while (i < calls.length) {
+    if (ctx.signal?.aborted) break;
     if (parsed[i].error) {
       results[i] = `Error: ${parsed[i].error}`;
       i++;
@@ -397,6 +412,7 @@ async function executeCalls(calls: ToolCall[], ctx: ToolContext, runner: Runner)
 
 class KeyReader {
   private buf = "";
+  private decoder = new StringDecoder("utf8");
   private escTimer: NodeJS.Timeout | null = null;
   private onKey: (k: Key) => void;
 
@@ -405,7 +421,7 @@ class KeyReader {
   }
 
   feed(chunk: string | Buffer) {
-    this.buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    this.buf += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
     const { keys, rest } = parseKeys(this.buf);
     this.buf = rest;
 
@@ -454,6 +470,29 @@ async function main() {
     return;
   }
 
+  const stdinTTY = process.stdin.isTTY === true;
+  const stdoutTTY = process.stdout.isTTY === true;
+  if (opts.print === undefined && stdinTTY && !stdoutTTY) {
+    console.error("interactive mode requires terminal stdout; use raw -p <text> when redirecting output");
+    process.exitCode = 2;
+    return;
+  }
+  let oneShotPrompt = opts.print;
+  if (oneShotPrompt === undefined && !stdinTTY) {
+    try {
+      oneShotPrompt = await readPipedPrompt();
+    } catch (err) {
+      console.error(red(err instanceof Error ? err.message : String(err)));
+      process.exitCode = 2;
+      return;
+    }
+    if (!oneShotPrompt) {
+      console.error("no prompt received on stdin (use raw -p <text>)");
+      process.exitCode = 2;
+      return;
+    }
+  }
+
   const resolveForSession = (session?: SessionFile) => resolveConfig({
     provider: opts.provider ?? (!process.env.RAW_PROVIDER ? session?.provider : undefined),
     model: opts.model ?? (!process.env.RAW_MODEL ? session?.model : undefined),
@@ -467,7 +506,7 @@ async function main() {
   let permission: PermissionMode = opts.permission ?? (process.env.RAW_PERMISSION as PermissionMode) ?? "auto";
   if (!PERMISSION_ORDER.includes(permission)) permission = "auto";
 
-  const interactive = opts.print === undefined && process.stdin.isTTY === true;
+  const interactive = opts.print === undefined && stdinTTY && stdoutTTY;
   const root = process.cwd();
 
   /* ------------------------------ state ------------------------------ */
@@ -521,7 +560,8 @@ async function main() {
   };
 
   let busy = false;
-  let asking: { editor: Editor; question: string; resolve: (s: string) => void } | null = null;
+  const CANCELLED_ANSWER = "\u0000cancelled";
+  let asking: { editor: Editor; question: string; resolve: (s: string | null) => void; timer?: NodeJS.Timeout } | null = null;
   let lastResultText = "";
 
   const currentEditor = () => asking?.editor ?? editor;
@@ -536,19 +576,26 @@ async function main() {
   /* --------------------------- the prompt --------------------------- */
 
   /** one column short of the terminal: filling the last cell triggers wrap */
-  const usableWidth = () => Math.max(20, screen.width() - 1);
+  const usableWidth = () => Math.max(8, screen.width() - 1);
 
   const draw = () => {
     if (!block) return;
     const width = usableWidth();
     const ed = currentEditor();
     const promptPrefix = asking
-      ? paint("? ", theme.warn) + paint(asking.question, bold) + " "
+      ? paint("? ", theme.warn) + paint(clip(asking.question, Math.max(1, Math.min(width - 5, Math.floor(width * 0.55)))), bold) + " "
       : paint(glyph.arrow, theme.brand) + " ";
-    const { rows, cursorRow, cursorCol } = ed.render(width, promptPrefix);
+    const rendered = ed.render(width, promptPrefix);
 
+    const maxBlockRows = Math.max(3, screen.height() - 1);
+    const allChips = ed.attachmentChips();
+    const chips = allChips.length && maxBlockRows >= 4
+      ? [clip("  " + allChips.map((c) => paint(c, theme.info)).join("  "), width)]
+      : [];
+    const available = Math.max(1, maxBlockRows - 2 - chips.length);
+    const menuLimit = Math.min(6, Math.max(0, available - 1));
     const menuRows = ed
-      .menuView(6)
+      .menuView(menuLimit)
       .map((m, i) =>
         clip(
           `  ${m.selected ? paint(glyph.arrow, theme.ok) : " "} ${m.selected ? paint(m.label, theme.accent) : dim(m.label)}${
@@ -558,9 +605,8 @@ async function main() {
         ),
       );
 
-    const chips = ed.attachmentChips().length
-      ? [clip("  " + ed.attachmentChips().map((c) => paint(c, theme.info)).join("  "), width)]
-      : [];
+    const inputLimit = Math.max(1, available - menuRows.length);
+    const viewport = fitViewport(rendered.rows, rendered.cursorRow, inputLimit);
 
     const hint = busy
       ? `${dim(keyLabel("interrupt"))} stop`
@@ -581,28 +627,37 @@ async function main() {
     );
 
     // the hint rule stays short: it must look right even if the width is a lie
-    const lines = [...menuRows, ...rows, ...chips, rule(Math.min(width, 72), hint), status];
-    block.render(lines, menuRows.length + cursorRow, cursorCol);
+    const lines = [...menuRows, ...viewport.lines, ...chips, rule(Math.min(width, 72), hint), status];
+    block.render(lines, menuRows.length + viewport.cursorRow, rendered.cursorCol);
   };
 
 
   /* ------------------------------ asking ------------------------------ */
 
-  const readAnswer = (question: string): Promise<string> => {
+  const readAnswer = (question: string, timeoutMs?: number): Promise<string | null> => {
     return new Promise((resolve) => {
       const ed = new Editor();
       asking = { editor: ed, question, resolve };
+      if (timeoutMs !== undefined) {
+        const current = asking;
+        current.timer = setTimeout(() => {
+          if (asking !== current) return;
+          asking = null;
+          block?.erase();
+          current.resolve(null);
+        }, timeoutMs);
+      }
       draw();
     });
   };
 
-  const finishAsk = (value: string | null) => {
+  const finishAsk = (value: string) => {
     const current = asking;
     asking = null;
     if (!current) return;
-    draw();
-    if (value === null) current.resolve("");
-    else current.resolve(value);
+    if (current.timer) clearTimeout(current.timer);
+    block?.erase();
+    current.resolve(value);
   };
 
   /* ---------------------------- run a turn ---------------------------- */
@@ -690,7 +745,23 @@ async function main() {
           if (isRetryable(err) && attempt < 2 && !wroteText && !reasoningOpen) {
             spinner?.stop();
             printLine(yellow(`  retrying: ${firstLine(msg, 100)}`));
-            await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+            const retry = await new Promise<boolean>((resolve) => {
+              let settled = false;
+              const finishWait = (continueRetry: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                abort = null;
+                resolve(continueRetry);
+              };
+              const timer = setTimeout(() => finishWait(true), 1200 * (attempt + 1));
+              abort = () => finishWait(false);
+            });
+            if (!retry) {
+              printLine(paint("  interrupted", theme.warn));
+              busy = false;
+              return;
+            }
             spinner?.start(dim("retrying"));
             continue;
           }
@@ -725,6 +796,8 @@ async function main() {
 
       const started = Date.now();
       spinner?.start(dim("running tools"));
+      const toolAbort = new AbortController();
+      abort = () => toolAbort.abort();
       const runner: Runner = {
         line: printLine,
         spinner,
@@ -732,12 +805,14 @@ async function main() {
         confirm: async (what: string) => {
           spinner?.stop();
           const answer = await readAnswer(`allow ${what}? [y/N]`);
-          return isYes(answer);
+          spinner?.start(dim("running tools"));
+          return isYes(answer ?? "");
         },
       };
       const toolCtx: ToolContext = {
         root,
         allowOutside,
+        signal: toolAbort.signal,
         // deliberately no confirm hook: executeCalls owns that decision
         confirm: undefined,
         handoff: async (message: string, timeoutMs: number) => {
@@ -745,16 +820,24 @@ async function main() {
           printLine("");
           printLine(`  ${paint("needs you", theme.warn)} ${bold(message)}`);
           printLine(dim(`  do it in the browser, then press Enter (auto-continues in ${Math.round(timeoutMs / 1000)}s)`));
-          const answer = await Promise.race([
-            readAnswer("press Enter when done"),
-            new Promise<string>((r) => setTimeout(() => r("\u0000timeout"), timeoutMs)),
-          ]);
-          return answer === "\u0000timeout" ? "user did not respond in time" : "user confirmed they finished";
+          const answer = await readAnswer("press Enter when done", timeoutMs);
+          spinner?.start(dim("running tools"));
+          return answer === null
+            ? "user did not respond in time"
+            : answer === CANCELLED_ANSWER
+              ? "user cancelled the handoff"
+              : "user confirmed they finished";
         },
       };
 
       const results = await executeCalls(result.toolCalls, toolCtx, runner);
+      abort = null;
       spinner?.stop();
+      if (toolAbort.signal.aborted) {
+        printLine(paint("  interrupted", theme.warn));
+        busy = false;
+        return;
+      }
       const ms = Date.now() - started;
 
       results.forEach((r, i) => {
@@ -799,7 +882,7 @@ async function main() {
       },
     };
 
-    await runOneShot(opts.print ?? "", messages, cfg, goal, toolCtx, runner, printLine, sessionFile, showReasoning, opts.maxTurns);
+    await runOneShot(oneShotPrompt ?? "", messages, cfg, goal, toolCtx, runner, printLine, sessionFile, showReasoning, opts.maxTurns);
     asker.close();
     return;
   }
@@ -831,8 +914,11 @@ async function main() {
   screen.enableBracketedPaste();
   screen.enableModifiedKeys();
 
+  let restored = false;
   const restore = () => {
-    block?.erase();
+    if (restored) return;
+    restored = true;
+    spinner?.stop();
     block?.erase();
     screen.restore();
   };
@@ -858,36 +944,44 @@ async function main() {
   const reader = new KeyReader((key) => {
     if (key.name === "resize" && key.cols && key.rows) {
       screen.noteReportedSize(key.cols, key.rows);
-      block?.erase();
-      draw();
+      if (!busy || asking) {
+        block?.erase();
+        draw();
+      }
       return;
     }
-    // Ctrl+C during generation stops it instead of killing the process
-    if (busy && (key.id === "escape" || key.id === "ctrl+c")) {
-      abort?.();
-      return;
-    }
-
-    const ed = currentEditor();
-    const action = ed.handle(key);
 
     if (asking) {
+      const ed = asking.editor;
+      const action = ed.handle(key);
       if (action?.type === "submit") finishAsk(action.text);
-      else if (key.name === "escape" || action?.type === "interrupt") finishAsk(null);
+      else if (key.name === "escape" || action?.type === "interrupt") finishAsk(CANCELLED_ANSWER);
       else if (key.name === "enter") finishAsk(""); // empty answer = decline
       else draw();
       return;
     }
 
+    // The spinner/stream owns the terminal while a turn is running. Letting
+    // normal input repaint here corrupts streamed output and creates duplicate
+    // submissions. Escape and Ctrl+C remain responsive.
+    if (busy) {
+      if (key.id === "escape" || key.id === "ctrl+c") abort?.();
+      return;
+    }
+
+    const ed = editor;
+    const action = ed.handle(key);
+
     if (!action) {
       // keep the block in sync after every keystroke
-      if (key.name !== "char" || ed.menu.length || ed.text().length) draw();
+      draw();
       return;
     }
 
     switch (action.type) {
       case "interrupt":
         block?.erase();
+        draw();
         break;
       case "exit":
         finish();
@@ -946,31 +1040,28 @@ async function main() {
   }, 200);
 
   async function handleSubmit(rawText: string, ed: Editor) {
+    if (busy) return;
+    busy = true;
     let text = rawText;
     const attachments = [...ed.attachments];
+    const attachmentLabels = [...ed.attachmentLabels];
     ed.clear();
 
-    // @image.png in the message becomes an attachment
-    const { paths, cleaned } = extractImagePaths(text);
-    for (const p of paths) {
-      const { readImageFile } = await import("./clipboard.ts");
-      const res = readImageFile(p);
-      if (res.ok) attachments.push(res.image);
-    }
-    text = cleaned;
-
+    // Commands must be parsed before image extraction. Otherwise an existing
+    // path in `/image shot.png` is removed as a message attachment and the
+    // command receives no argument.
     if (text.startsWith("/")) {
       const [name, ...rest] = text.slice(1).split(/\s+/);
       const arg = rest.join(" ").trim();
       const command = findCommand(name);
       ed.remember(text);
-      if (!command) {
-        printLine(paint(`  unknown command /${name} — try /help`, theme.warn));
-        draw();
-        return;
-      }
-      block?.erase();
+      if (name !== "new") attachments.forEach((image, i) => ed.attach(image, attachmentLabels[i] ?? `image-${i + 1}`));
       try {
+        if (!command) {
+          printLine(paint(`  unknown command /${name} — try /help`, theme.warn));
+          return;
+        }
+        block?.erase();
         await command.run(
           {
             cfg,
@@ -1007,22 +1098,44 @@ async function main() {
         if (["goal", "new", "model", "provider", "effort"].includes(name)) saveSession(sessionFile, messages, goal, cfg);
       } catch (err) {
         printLine(red(`  /${name} failed: ${err instanceof Error ? err.message : String(err)}`));
+      } finally {
+        busy = false;
+        draw();
       }
-      draw();
       return;
     }
 
-    if (!text.trim() && !attachments.length) {
-      draw();
-      return;
-    }
+    try {
+      // @image.png in a normal message becomes an attachment. If a file has an
+      // image extension but invalid bytes, keep the reference in the message
+      // and tell the user instead of silently deleting it.
+      const { paths, cleaned } = extractImagePaths(text);
+      const rejectedPaths: string[] = [];
+      for (const p of paths) {
+        const { readImageFile } = await import("./clipboard.ts");
+        const res = readImageFile(p);
+        if (res.ok) attachments.push(res.image);
+        else {
+          rejectedPaths.push(`@${p}`);
+          printLine(paint(`  cannot attach ${p}: ${res.reason}`, theme.warn));
+        }
+      }
+      text = [cleaned, ...rejectedPaths].filter(Boolean).join(" ");
 
-    ed.remember(text);
-    messages.push({ role: "user", content: text, images: attachments.length ? attachments : undefined });
-    block?.erase();
-    printLine(`${paint(glyph.arrow, theme.brand)} ${bold(firstLine(text, usableWidth() - 4) || "(image)")}${attachments.length ? dim(` [+${attachments.length} image]`) : ""}`);
-    await runTurns();
-    draw();
+      if (!text.trim() && !attachments.length) return;
+
+      ed.remember(text);
+      messages.push({ role: "user", content: text, images: attachments.length ? attachments : undefined });
+      block?.erase();
+      printLine(`${paint(glyph.arrow, theme.brand)} ${bold(firstLine(text, usableWidth() - 4) || "(image)")}${attachments.length ? dim(` [+${attachments.length} image]`) : ""}`);
+      await runTurns();
+    } catch (err) {
+      spinner?.stop();
+      printLine(red(`  turn failed: ${compactError(err instanceof Error ? err.message : String(err))}`));
+    } finally {
+      busy = false;
+      draw();
+    }
   }
 
   /* ------------------------------ /compact ------------------------------ */
@@ -1100,7 +1213,11 @@ function completeFiles(token: string, root: string): { value: string; hint?: str
       .slice(0, 40)
       .map((e) => {
         const prefix = dir === "." ? "" : dir.replace(/\/?$/, "/");
-        return { value: `@${prefix}${e.name}${e.isDirectory() ? "/" : ""}`, hint: e.isDirectory() ? "dir" : "" };
+        const relative = `${prefix}${e.name}${e.isDirectory() ? "/" : ""}`;
+        const value = /\s/.test(relative)
+          ? `@"${relative}${e.isDirectory() ? "" : "\""}`
+          : `@${relative}`;
+        return { value, hint: e.isDirectory() ? "dir" : "" };
       });
   } catch {
     return [];
@@ -1125,12 +1242,15 @@ async function runOneShot(
   if (prompt.trim()) {
     const { paths, cleaned } = extractImagePaths(prompt);
     const images = [];
+    const rejectedPaths: string[] = [];
     for (const p of paths) {
       const { readImageFile } = await import("./clipboard.ts");
       const res = readImageFile(p);
       if (res.ok) images.push(res.image);
+      else rejectedPaths.push(`@${p}`);
     }
-    messages.push({ role: "user", content: cleaned.trim() || prompt, images: images.length ? images : undefined });
+    const content = [cleaned, ...rejectedPaths].filter(Boolean).join(" ").trim() || prompt;
+    messages.push({ role: "user", content, images: images.length ? images : undefined });
   }
 
   for (let turn = 0; turn < maxTurns; turn++) {

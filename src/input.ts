@@ -49,7 +49,7 @@ export function makeAsker(): Asker {
   let buf = "";
   const queue: string[] = [];
   const waiters: ((line: string) => void)[] = [];
-  let eof = false;
+  let eof = process.stdin.readableEnded;
 
   const deliver = (line: string) => {
     const w = waiters.shift();
@@ -107,6 +107,7 @@ export async function choose<T>(ask: Asker, items: T[], label: (item: T, i: numb
     }
     const n = Number(answer);
     if (Number.isInteger(n) && n >= 1 && n <= items.length) return items[n - 1];
-    return undefined; // caller treats a non-numeric answer as free text
+    const named = items.find((item, i) => label(item, i).trim().toLocaleLowerCase() === answer.toLocaleLowerCase());
+    return named; // caller treats any unmatched answer as free text
   }
 }

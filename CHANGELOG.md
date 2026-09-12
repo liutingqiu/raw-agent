@@ -3,6 +3,23 @@
 All notable changes to `raw` are documented here. The format follows Keep a Changelog and versions
 follow Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Prompts can be supplied through piped stdin, including multiline input.
+
+### Fixed
+
+- Terminal editing now treats emoji, combining marks, and wrapped rows as complete visual units.
+- Modified Enter, Tab, Backspace, and arrow keys are decoded consistently across xterm and Kitty keyboard protocols.
+- Narrow and short terminals keep prompts, completion menus, status lines, and permission questions inside the viewport.
+- Slash commands retain existing image attachments, quoted image paths work, and invalid images remain visible as file references.
+- Input can no longer mutate or submit the editor while a turn is streaming.
+- Escape and Ctrl+C now cancel model retries and long-running shell, browser, and web tools without wedging the session.
+- Timed prompts clear their state, cancelled browser handoffs are reported accurately, and terminal modes restore only once on exit.
+- Setup menus accept exact item names, and already-ended non-interactive stdin no longer hangs setup.
+
 ## [0.4.0] - 2026-09-12
 
 ### Added
@@ -47,4 +64,5 @@ follow Semantic Versioning.
 - Strict TypeScript checking, a locked development toolchain, and full CLI protocol, setup, and permission smoke tests now gate publication.
 - Browser smoke testing uses a disposable profile and covers forms, iframes, downloads, screenshots, isolated spaces, cleanup, and CPU timeouts.
 
+[Unreleased]: https://github.com/liutingqiu/raw-agent/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/liutingqiu/raw-agent/releases/tag/v0.4.0

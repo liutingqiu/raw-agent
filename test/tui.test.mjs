@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { parseKeys } from "../src/tui/term.ts";
 import { Editor } from "../src/tui/editor.ts";
 import { clip, displayWidth, pad, screen } from "../src/tui/term.ts";
-import { Block, statusLine, meter, humanTokens } from "../src/tui/ui.ts";
+import { Block, fitViewport, statusLine, meter, humanTokens, rule, startupLines } from "../src/tui/ui.ts";
 import { commandCompletions, findCommand, PERMISSION_ORDER } from "../src/tui/commands.ts";
 
 /* ------------------------------------------------------------------ *
@@ -36,6 +36,22 @@ test("modified arrows carry their modifiers", () => {
   assert.equal(keys[0].id, "ctrl+right");
   assert.equal(keys[1].id, "alt+left");
   assert.equal(keys[2].id, "shift+tab");
+});
+
+test("all xterm modifier combinations are decoded from the encoded bitmask", () => {
+  const { keys } = parseKeys("\x1b[1;4C\x1b[1;8D");
+  assert.equal(keys[0].id, "alt+shift+right");
+  assert.equal(keys[1].id, "ctrl+alt+shift+left");
+});
+
+test("kitty modified enter and backspace become semantic keys", () => {
+  const { keys } = parseKeys("\x1b[13;2u\x1b[127;5u\x1b\x7f");
+  assert.deepEqual(keys.map((key) => key.id), ["shift+enter", "ctrl+backspace", "alt+backspace"]);
+});
+
+test("raw LF is Ctrl+J while CR remains Enter", () => {
+  const { keys } = parseKeys("\n\r");
+  assert.deepEqual(keys.map((key) => key.id), ["ctrl+j", "enter"]);
 });
 
 test("delete / pageup / pagedown tilde sequences", () => {
@@ -105,6 +121,18 @@ test("ctrl+c clears the line, ctrl+d exits only when empty", () => {
   assert.equal(ed.handle({ name: "char", text: "d", ctrl: true, id: "ctrl+d" }), null);
 });
 
+test("emoji and combining characters move and delete as whole graphemes", () => {
+  const ed = new Editor();
+  type(ed, "A👩🏽‍💻e\u0301B");
+  ed.handle({ name: "left", id: "left" });
+  ed.handle({ name: "backspace", id: "backspace" });
+  assert.equal(ed.text(), "A👩🏽‍💻B");
+  ed.handle({ name: "home", id: "home" });
+  ed.handle({ name: "right", id: "right" });
+  ed.handle({ name: "delete", id: "delete" });
+  assert.equal(ed.text(), "AB");
+});
+
 test("multiline editing with ctrl+j and enter-to-submit", () => {
   const ed = new Editor();
   type(ed, "one");
@@ -115,6 +143,22 @@ test("multiline editing with ctrl+j and enter-to-submit", () => {
   const action = ed.handle({ name: "enter", id: "enter" });
   assert.equal(action?.type === "submit" && action.text, "one\ntwo");
   assert.equal(action?.type === "submit" && action.text.includes("\n"), true);
+});
+
+test("shift-enter adds a line and shift-tab cycles permission", () => {
+  const ed = new Editor();
+  type(ed, "one");
+  assert.equal(ed.handle({ name: "enter", shift: true, id: "shift+enter" }), null);
+  type(ed, "two");
+  assert.equal(ed.text(), "one\ntwo");
+  assert.equal(ed.handle({ name: "tab", shift: true, id: "shift+tab" })?.type, "permission-cycle");
+});
+
+test("modified backspace deletes a word", () => {
+  const ed = new Editor();
+  type(ed, "alpha beta");
+  ed.handle({ name: "backspace", alt: true, id: "alt+backspace" });
+  assert.equal(ed.text(), "alpha ");
 });
 
 test("word and line operations", () => {
@@ -186,6 +230,23 @@ test("attachments are tracked and cleared", () => {
   assert.equal(ed.isEmpty(), true);
 });
 
+test("a fully typed command submits on the first enter", () => {
+  const ed = new Editor();
+  ed.completer = (token, kind) => (kind === "command" ? commandCompletions(token) : []);
+  type(ed, "/context");
+  const action = ed.handle({ name: "enter", id: "enter" });
+  assert.equal(action?.type, "submit");
+  assert.equal(action?.type === "submit" && action.text, "/context");
+});
+
+test("backspace on empty input removes the latest attachment", () => {
+  const ed = new Editor();
+  ed.attach({ mime: "image/png", data: "AAA" }, "one.png");
+  ed.attach({ mime: "image/png", data: "BBB" }, "two.png");
+  ed.handle({ name: "backspace", id: "backspace" });
+  assert.deepEqual(ed.attachmentChips(), ["[1] one.png"]);
+});
+
 /* ------------------------------------------------------------------ *
  * rendering maths
  * ------------------------------------------------------------------ */
@@ -194,6 +255,9 @@ test("display width counts CJK as two cells and ignores colour codes", () => {
   assert.equal(displayWidth("abc"), 3);
   assert.equal(displayWidth("中文"), 4);
   assert.equal(displayWidth("\x1b[31mabc\x1b[0m"), 3);
+  assert.equal(displayWidth("e\u0301"), 1);
+  assert.equal(displayWidth("👩🏽‍💻"), 2);
+  assert.equal(displayWidth("🇨🇳"), 2);
 });
 
 test("clip and pad respect display width", () => {
@@ -230,6 +294,46 @@ test("the status line always fits the terminal", () => {
     );
     assert.equal(displayWidth(line), width, `width ${width}`);
   }
+});
+
+test("up and down move through visual wraps before browsing history", () => {
+  const ed = new Editor();
+  ed.remember("older history");
+  type(ed, "x".repeat(30));
+  ed.render(12, "> ");
+  ed.handle({ name: "up", id: "up" });
+  assert.equal(ed.text(), "x".repeat(30));
+  assert.ok(ed.col >= 10 && ed.col < 20);
+  ed.render(12, "> ");
+  ed.handle({ name: "up", id: "up" });
+  assert.equal(ed.text(), "x".repeat(30));
+  assert.ok(ed.col < 10);
+  ed.render(12, "> ");
+  ed.handle({ name: "up", id: "up" });
+  assert.equal(ed.text(), "older history");
+});
+
+test("the hint rule never exceeds a narrow terminal", () => {
+  for (const width of [8, 12, 20, 40]) {
+    assert.equal(displayWidth(rule(width, "/ commands  @ files  ? help  Shift+Tab mode")), width);
+  }
+});
+
+test("the startup card fits narrow terminal widths", () => {
+  const info = {
+    version: "0.4.0", provider: "long-provider", model: "long-model", effort: "high",
+    permission: "readonly", workspace: "D:/a very long workspace/path", toolCount: 10, configured: true,
+  };
+  for (const width of [8, 10, 12, 20, 40]) {
+    for (const line of startupLines(info, width)) assert.equal(displayWidth(line), Math.max(4, width));
+  }
+});
+
+test("the input viewport stays within height and keeps the cursor visible", () => {
+  const lines = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+  assert.deepEqual(fitViewport(lines, 0, 4), { lines: lines.slice(0, 4), cursorRow: 0, start: 0 });
+  assert.deepEqual(fitViewport(lines, 10, 4), { lines: lines.slice(7, 11), cursorRow: 3, start: 7 });
+  assert.deepEqual(fitViewport(lines, 19, 4), { lines: lines.slice(16), cursorRow: 3, start: 16 });
 });
 
 /* ------------------------------------------------------------------ *
@@ -302,6 +406,33 @@ test("accepting a completion keeps the menu closed afterwards", () => {
   assert.equal(ed.handle({ name: "tab", id: "tab" }), null);
   assert.equal(ed.text(), "/effort ");
   assert.equal(ed.menu.length, 0);
+});
+
+test("completion preserves text after the cursor", () => {
+  const ed = new Editor();
+  ed.completer = (t, k) => (k === "command" ? [{ value: "/model" }] : []);
+  ed.setText("/mo tail");
+  ed.col = 3;
+  ed.refreshMenu();
+  ed.handle({ name: "tab", id: "tab" });
+  assert.equal(ed.text(), "/model  tail");
+});
+
+test("quoted file completion supports paths with spaces", () => {
+  const ed = new Editor();
+  ed.completer = (t, k) => (k === "file" && t === "my dir/f" ? [{ value: '@"my dir/file.txt"' }] : []);
+  type(ed, '@"my dir/f');
+  ed.handle({ name: "tab", id: "tab" });
+  assert.equal(ed.text(), '@"my dir/file.txt"');
+});
+
+test("the selected completion remains visible when the menu scrolls", () => {
+  const ed = new Editor();
+  ed.menu = Array.from({ length: 12 }, (_, i) => ({ value: `/item-${i}` }));
+  ed.menuIndex = 10;
+  const view = ed.menuView(6);
+  assert.equal(view.length, 6);
+  assert.equal(view.some((item) => item.selected && item.label === "/item-10"), true);
 });
 
 test("the terminal's window-size reply (CSI 18 t) is parsed", () => {

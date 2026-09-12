@@ -146,6 +146,7 @@ async function request(
   url: string,
   init: { method?: string; headers?: Record<string, string>; body?: string } = {},
   timeoutMs = DEFAULT_TIMEOUT,
+  signal?: AbortSignal,
 ): Promise<Fetched> {
   let res: Response;
   try {
@@ -159,7 +160,7 @@ async function request(
       },
       body: init.body,
       redirect: "follow",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     const cause = (err as { cause?: { code?: string } })?.cause?.code ?? "";
@@ -182,9 +183,9 @@ function clip(s: string, n = 400): string {
   return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
-async function searchBing(query: string, count: number, timeoutMs: number): Promise<SearchResult[]> {
+async function searchBing(query: string, count: number, timeoutMs: number, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 30)}&setlang=en`;
-  const { body } = await request(url, {}, timeoutMs);
+  const { body } = await request(url, {}, timeoutMs, signal);
   const out: SearchResult[] = [];
   const re =
     /<h2[^>]*>\s*<a[^>]*?href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)(?=<li class="b_algo"|<li class="b_ans"|<\/ol>|$)/gi;
@@ -198,9 +199,9 @@ async function searchBing(query: string, count: number, timeoutMs: number): Prom
   return out;
 }
 
-async function search360(query: string, count: number, timeoutMs: number): Promise<SearchResult[]> {
+async function search360(query: string, count: number, timeoutMs: number, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = `https://www.so.com/s?q=${encodeURIComponent(query)}`;
-  const { body } = await request(url, {}, timeoutMs);
+  const { body } = await request(url, {}, timeoutMs, signal);
   const out: SearchResult[] = [];
   const re =
     /<h3[^>]*class="[^"]*res-title[^"]*"[^>]*>\s*<a[^>]*?href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?=<h3[^>]*class="[^"]*res-title|<\/ol>|$)/gi;
@@ -216,7 +217,7 @@ async function search360(query: string, count: number, timeoutMs: number): Promi
   return out;
 }
 
-async function searchTavily(query: string, count: number, timeoutMs: number, key: string): Promise<SearchResult[]> {
+async function searchTavily(query: string, count: number, timeoutMs: number, key: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const { body } = await request(
     "https://api.tavily.com/search",
     {
@@ -225,6 +226,7 @@ async function searchTavily(query: string, count: number, timeoutMs: number, key
       body: JSON.stringify({ api_key: key, query, max_results: count, search_depth: "advanced" }),
     },
     timeoutMs,
+    signal,
   );
   const json = JSON.parse(body) as { results?: { title?: string; url?: string; content?: string }[] };
   return (json.results ?? [])
@@ -232,7 +234,7 @@ async function searchTavily(query: string, count: number, timeoutMs: number, key
     .filter((r) => r.url);
 }
 
-async function searchExa(query: string, count: number, timeoutMs: number, key: string): Promise<SearchResult[]> {
+async function searchExa(query: string, count: number, timeoutMs: number, key: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const { body } = await request(
     "https://api.exa.ai/search",
     {
@@ -241,6 +243,7 @@ async function searchExa(query: string, count: number, timeoutMs: number, key: s
       body: JSON.stringify({ query, numResults: count, contents: { text: { maxCharacters: 600 } } }),
     },
     timeoutMs,
+    signal,
   );
   const json = JSON.parse(body) as { results?: { title?: string; url?: string; text?: string }[] };
   return (json.results ?? [])
@@ -248,7 +251,7 @@ async function searchExa(query: string, count: number, timeoutMs: number, key: s
     .filter((r) => r.url);
 }
 
-async function searchSerper(query: string, count: number, timeoutMs: number, key: string): Promise<SearchResult[]> {
+async function searchSerper(query: string, count: number, timeoutMs: number, key: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const { body } = await request(
     "https://google.serper.dev/search",
     {
@@ -257,6 +260,7 @@ async function searchSerper(query: string, count: number, timeoutMs: number, key
       body: JSON.stringify({ q: query, num: count }),
     },
     timeoutMs,
+    signal,
   );
   const json = JSON.parse(body) as { organic?: { title?: string; link?: string; snippet?: string }[] };
   return (json.organic ?? [])
@@ -264,9 +268,9 @@ async function searchSerper(query: string, count: number, timeoutMs: number, key
     .filter((r) => r.url);
 }
 
-async function searchSearxng(query: string, count: number, timeoutMs: number, base: string): Promise<SearchResult[]> {
+async function searchSearxng(query: string, count: number, timeoutMs: number, base: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = `${base.replace(/\/+$/, "")}/search?q=${encodeURIComponent(query)}&format=json`;
-  const { body } = await request(url, {}, timeoutMs);
+  const { body } = await request(url, {}, timeoutMs, signal);
   const json = JSON.parse(body) as { results?: { title?: string; url?: string; content?: string }[] };
   return (json.results ?? [])
     .slice(0, count)
@@ -291,26 +295,26 @@ export function availableBackends(): Backend[] {
   return list;
 }
 
-async function runBackend(engine: Backend, query: string, count: number, timeoutMs: number): Promise<SearchResult[]> {
+async function runBackend(engine: Backend, query: string, count: number, timeoutMs: number, signal?: AbortSignal): Promise<SearchResult[]> {
   switch (engine) {
     case "tavily":
-      return searchTavily(query, count, timeoutMs, process.env.TAVILY_API_KEY!);
+      return searchTavily(query, count, timeoutMs, process.env.TAVILY_API_KEY!, signal);
     case "exa":
-      return searchExa(query, count, timeoutMs, process.env.EXA_API_KEY!);
+      return searchExa(query, count, timeoutMs, process.env.EXA_API_KEY!, signal);
     case "serper":
-      return searchSerper(query, count, timeoutMs, process.env.SERPER_API_KEY!);
+      return searchSerper(query, count, timeoutMs, process.env.SERPER_API_KEY!, signal);
     case "searxng":
-      return searchSearxng(query, count, timeoutMs, process.env.SEARXNG_URL!);
+      return searchSearxng(query, count, timeoutMs, process.env.SEARXNG_URL!, signal);
     case "bing":
-      return searchBing(query, count, timeoutMs);
+      return searchBing(query, count, timeoutMs, signal);
     case "360":
-      return search360(query, count, timeoutMs);
+      return search360(query, count, timeoutMs, signal);
     default:
       throw new Error(`unknown engine ${engine}`);
   }
 }
 
-export type SearchOptions = { count?: number; engine?: string; timeoutMs?: number };
+export type SearchOptions = { count?: number; engine?: string; timeoutMs?: number; signal?: AbortSignal };
 
 export async function webSearch(query: string, opts: SearchOptions = {}): Promise<SearchOutcome> {
   const count = Math.max(1, Math.min(opts.count ?? 8, 30));
@@ -329,7 +333,7 @@ export async function webSearch(query: string, opts: SearchOptions = {}): Promis
   const problems: string[] = [];
   for (const engine of order) {
     try {
-      const results = await runBackend(engine, query, count, timeoutMs);
+      const results = await runBackend(engine, query, count, timeoutMs, opts.signal);
       if (results.length) {
         return { engine, results, note: problems.length ? problems.join("; ") : undefined };
       }
@@ -341,7 +345,7 @@ export async function webSearch(query: string, opts: SearchOptions = {}): Promis
   return { engine: "none", results: [], note: problems.join("; ") };
 }
 
-export type FetchOptions = { maxChars?: number; raw?: boolean; timeoutMs?: number };
+export type FetchOptions = { maxChars?: number; raw?: boolean; timeoutMs?: number; signal?: AbortSignal };
 
 export async function webFetch(
   url: string,
@@ -349,7 +353,7 @@ export async function webFetch(
 ): Promise<{ url: string; contentType: string; text: string }> {
   const maxChars = Math.max(1, Math.min(opts.maxChars ?? 20_000, 200_000));
   const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-  const r = await request(target, {}, opts.timeoutMs ?? DEFAULT_TIMEOUT);
+  const r = await request(target, {}, opts.timeoutMs ?? DEFAULT_TIMEOUT, opts.signal);
   const isJson = r.contentType.includes("json");
   const isHtml = r.contentType.includes("html") || /^\s*<(!doctype|html)/i.test(r.body);
 

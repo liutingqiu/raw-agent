@@ -109,6 +109,24 @@ test("webFetch respects a legacy Chinese response charset", async () => {
   }
 });
 
+test("webFetch can be cancelled before its timeout", async () => {
+  const http = await import("node:http");
+  const server = http.createServer(() => {});
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 100);
+  try {
+    const address = server.address();
+    await assert.rejects(
+      webFetch(`http://127.0.0.1:${address.port}`, { timeoutMs: 10_000, signal: ac.signal }),
+      /aborted/i,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /* ------------------------------ presets ------------------------------ */
 
 test("every preset is well formed and uniquely named", () => {

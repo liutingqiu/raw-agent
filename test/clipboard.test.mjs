@@ -27,3 +27,14 @@ test("local images are identified by bytes rather than filename", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("quoted image paths are accepted", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "raw-quoted-image-test-"));
+  try {
+    const file = path.join(dir, "image with spaces.png");
+    fs.writeFileSync(file, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1DEAAAAALUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+    assert.equal(readImageFile(`"${file}"`).ok, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

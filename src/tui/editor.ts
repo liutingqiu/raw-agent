@@ -5,7 +5,7 @@
  * is computed here so it can be unit tested without a tty.
  */
 import type { Key } from "./term.ts";
-import { displayWidth } from "./term.ts";
+import { displayWidth, graphemes } from "./term.ts";
 import { glyph } from "./theme.ts";
 import type { ImagePart } from "../tools.ts";
 
@@ -20,6 +20,7 @@ export type EditorAction =
   | null;
 
 export type Completion = { value: string; hint?: string };
+type VisualRow = { line: number; start: number; end: number; prefixWidth: number; last: boolean };
 
 const WORD = /[\p{L}\p{N}_]/u;
 
@@ -39,6 +40,8 @@ export class Editor {
   history: string[] = [];
   private historyIndex = -1;
   private draft = "";
+  private visualRows: VisualRow[] = [];
+  private verticalColumn: number | null = null;
 
   /** completion menu */
   menu: Completion[] = [];
@@ -62,6 +65,7 @@ export class Editor {
     if (!this.lines.length) this.lines = [""];
     this.row = this.lines.length - 1;
     this.col = this.lines[this.row].length;
+    this.verticalColumn = null;
     this.refreshMenu();
   }
 
@@ -75,6 +79,8 @@ export class Editor {
     this.draft = "";
     this.menu = [];
     this.menuKind = null;
+    this.visualRows = [];
+    this.verticalColumn = null;
   }
 
   attach(image: ImagePart, label: string) {
@@ -97,7 +103,12 @@ export class Editor {
     this.lines[this.row] = s;
   }
 
+  private resetVertical() {
+    this.verticalColumn = null;
+  }
+
   insert(text: string) {
+    this.resetVertical();
     if (!text.includes("\n")) {
       const line = this.line();
       this.setLine(line.slice(0, this.col) + text + line.slice(this.col));
@@ -118,6 +129,7 @@ export class Editor {
   }
 
   private newline() {
+    this.resetVertical();
     const line = this.line();
     this.lines.splice(this.row, 1, line.slice(0, this.col), line.slice(this.col));
     this.row++;
@@ -127,24 +139,30 @@ export class Editor {
   }
 
   backspace() {
+    this.resetVertical();
     if (this.col > 0) {
       const line = this.line();
-      this.setLine(line.slice(0, this.col - 1) + line.slice(this.col));
-      this.col--;
+      const previous = graphemes(line).findLast((part) => part.end <= this.col)?.start ?? 0;
+      this.setLine(line.slice(0, previous) + line.slice(this.col));
+      this.col = previous;
     } else if (this.row > 0) {
       const prev = this.lines[this.row - 1];
       const merged = prev + this.line();
       this.lines.splice(this.row - 1, 2, merged);
       this.row--;
       this.col = prev.length;
+    } else if (!this.line().length && this.attachments.length) {
+      this.removeAttachment(this.attachments.length - 1);
     }
     this.refreshMenu();
   }
 
   deleteForward() {
+    this.resetVertical();
     const line = this.line();
     if (this.col < line.length) {
-      this.setLine(line.slice(0, this.col) + line.slice(this.col + 1));
+      const next = graphemes(line).find((part) => part.start >= this.col)?.end ?? line.length;
+      this.setLine(line.slice(0, this.col) + line.slice(next));
     } else if (this.row < this.lines.length - 1) {
       this.setLine(line + this.lines[this.row + 1]);
       this.lines.splice(this.row + 1, 1);
@@ -153,6 +171,7 @@ export class Editor {
   }
 
   killWord() {
+    this.resetVertical();
     const line = this.line();
     if (this.col === 0) {
       this.backspace();
@@ -167,12 +186,14 @@ export class Editor {
   }
 
   killLine() {
+    this.resetVertical();
     this.setLine(this.line().slice(this.col));
     this.col = 0;
     this.refreshMenu();
   }
 
   private moveWord(delta: number) {
+    this.resetVertical();
     const line = this.line();
     let i = this.col;
     if (delta < 0) {
@@ -185,17 +206,51 @@ export class Editor {
     this.col = i;
   }
 
+  private moveVisual(delta: -1 | 1): boolean {
+    if (!this.visualRows.length) return false;
+    const currentIndex = this.visualRows.findIndex((part) =>
+      part.line === this.row && this.col >= part.start && (this.col < part.end || (part.last && this.col <= part.end))
+    );
+    if (currentIndex < 0) return false;
+    const target = this.visualRows[currentIndex + delta];
+    if (!target) return false;
+
+    const current = this.visualRows[currentIndex];
+    const currentColumn = current.prefixWidth + displayWidth(this.lines[this.row].slice(current.start, this.col));
+    const wanted = this.verticalColumn ?? currentColumn;
+    this.verticalColumn = wanted;
+
+    const available = Math.max(0, wanted - target.prefixWidth);
+    const segment = this.lines[target.line].slice(target.start, target.end);
+    let width = 0;
+    let offset = 0;
+    const parts = graphemes(segment);
+    for (const part of parts) {
+      const next = width + displayWidth(part.text);
+      if (next > available) break;
+      width = next;
+      offset = part.end;
+    }
+    // A boundary at the end of a wrapped row is rendered at the start of the
+    // following row. Keep the cursor visibly on the requested target row.
+    if (!target.last && offset === segment.length && parts.length) offset = parts.at(-1)!.start;
+    this.row = target.line;
+    this.col = target.start + offset;
+    this.refreshMenu();
+    return true;
+  }
+
   private cursorUp() {
     if (this.menu.length) {
       this.menuIndex = (this.menuIndex - 1 + this.menu.length) % this.menu.length;
       return;
     }
-    if (this.row > 0) {
+    if (!this.visualRows.length && this.row > 0) {
       this.row--;
       this.col = Math.min(this.col, this.line().length);
-    } else {
-      this.historyStep(-1);
+      return;
     }
+    if (!this.moveVisual(-1)) this.historyStep(-1);
   }
 
   private cursorDown() {
@@ -203,12 +258,12 @@ export class Editor {
       this.menuIndex = (this.menuIndex + 1) % this.menu.length;
       return;
     }
-    if (this.row < this.lines.length - 1) {
+    if (!this.visualRows.length && this.row < this.lines.length - 1) {
       this.row++;
       this.col = Math.min(this.col, this.line().length);
-    } else {
-      this.historyStep(1);
+      return;
     }
+    if (!this.moveVisual(1)) this.historyStep(1);
   }
 
   /* ------------------------------- history ------------------------------- */
@@ -242,6 +297,7 @@ export class Editor {
     this.lines = text.split("\n");
     this.row = this.lines.length - 1;
     this.col = this.lines[this.row].length;
+    this.verticalColumn = null;
   }
 
   /* ----------------------------- completion ----------------------------- */
@@ -249,14 +305,15 @@ export class Editor {
   /** the token the cursor is currently inside, plus how it started */
   private currentToken(): { token: string; kind: "command" | "file" | null; start: number } {
     const line = this.line().slice(0, this.col);
-    const at = line.lastIndexOf("@");
     const slash = line.match(/(?:^|\s)\/([\w-]*)$/);
     if (slash) {
       const start = line.length - slash[1].length - 1;
       return { token: slash[1], kind: "command", start };
     }
-    if (at >= 0 && !/\s/.test(line.slice(at + 1))) {
-      return { token: line.slice(at + 1), kind: "file", start: at };
+    const file = /(?:^|\s)@(?:"([^"]*)"?|([^\s]*))$/.exec(line);
+    if (file) {
+      const start = line.lastIndexOf("@");
+      return { token: file[1] ?? file[2] ?? "", kind: "file", start };
     }
     return { token: "", kind: null, start: this.col };
   }
@@ -286,10 +343,11 @@ export class Editor {
     const { kind, start } = this.currentToken();
     const value = this.menu[this.menuIndex].value;
     const line = this.line();
-    const end = kind === "file" ? this.col : line.length;
+    const end = this.col;
     const insert = kind === "command" ? value + " " : value;
     this.setLine(line.slice(0, start) + insert + line.slice(end));
     this.col = start + insert.length;
+    this.resetVertical();
     this.menu = [];
     this.menuKind = null;
     return true;
@@ -298,6 +356,27 @@ export class Editor {
   /* -------------------------------- keys -------------------------------- */
 
   handle(key: Key): EditorAction {
+    if (key.id === "shift+tab") return { type: "permission-cycle" };
+    if (key.id === "shift+enter" || key.id === "alt+enter") {
+      this.newline();
+      return null;
+    }
+    if (key.id === "alt+backspace" || key.id === "ctrl+backspace") {
+      this.killWord();
+      return null;
+    }
+
+    // A fully typed command should run on the first Enter. Partial entries can
+    // still use Enter or Tab to accept the highlighted completion.
+    if (this.menu.length && key.id === "enter" && this.menuKind === "command") {
+      const { start } = this.currentToken();
+      if (this.line().slice(start, this.col) === this.menu[this.menuIndex].value) {
+        this.menu = [];
+        this.menuKind = null;
+        return this.submit();
+      }
+    }
+
     // A menu key first: Enter accepts rather than submits.
     if (this.menu.length && (key.id === "enter" || key.name === "tab")) {
       this.acceptCompletion();
@@ -325,20 +404,24 @@ export class Editor {
         this.deleteForward();
         return null;
       case "left":
+        this.resetVertical();
         if (key.ctrl || key.alt) this.moveWord(-1);
-        else if (this.col > 0) this.col--;
+        else if (this.col > 0) this.col = graphemes(this.line()).findLast((part) => part.end <= this.col)?.start ?? 0;
         else if (this.row > 0) {
           this.row--;
           this.col = this.line().length;
         }
+        this.refreshMenu();
         return null;
       case "right":
+        this.resetVertical();
         if (key.ctrl || key.alt) this.moveWord(1);
-        else if (this.col < this.line().length) this.col++;
+        else if (this.col < this.line().length) this.col = graphemes(this.line()).find((part) => part.start >= this.col)?.end ?? this.line().length;
         else if (this.row < this.lines.length - 1) {
           this.row++;
           this.col = 0;
         }
+        this.refreshMenu();
         return null;
       case "up":
         this.cursorUp();
@@ -347,10 +430,14 @@ export class Editor {
         this.cursorDown();
         return null;
       case "home":
+        this.resetVertical();
         this.col = 0;
+        this.refreshMenu();
         return null;
       case "end":
+        this.resetVertical();
         this.col = this.line().length;
+        this.refreshMenu();
         return null;
       case "tab":
         this.refreshMenu();
@@ -384,10 +471,14 @@ export class Editor {
       case "o":
         return { type: "expand" };
       case "a":
+        this.resetVertical();
         this.col = 0;
+        this.refreshMenu();
         return null;
       case "e":
+        this.resetVertical();
         this.col = this.line().length;
+        this.refreshMenu();
         return null;
       case "u":
         this.killLine();
@@ -397,6 +488,7 @@ export class Editor {
         return null;
       case "k":
         this.setLine(this.line().slice(0, this.col));
+        this.refreshMenu();
         return null;
       default:
         return null;
@@ -421,56 +513,67 @@ export class Editor {
    */
   render(width: number, prompt: string, continuation = "  "): { rows: string[]; cursorRow: number; cursorCol: number } {
     const rows: string[] = [];
+    const visualRows: VisualRow[] = [];
     let cursorRow = 0;
     let cursorCol = 0;
 
     this.lines.forEach((line, li) => {
       const prefix = li === 0 ? prompt : continuation;
-      const avail = Math.max(4, width - displayWidth(prefix));
-      const chars = [...line];
+      const avail = Math.max(2, width - displayWidth(prefix));
+      const chars = graphemes(line);
 
       // wrap into chunks, remembering where the cursor's chunk is
       const chunks: { text: string; start: number; end: number }[] = [];
       let start = 0;
       let w = 0;
       let buf = "";
-      chars.forEach((ch, idx) => {
-        const cw = displayWidth(ch);
+      chars.forEach((part) => {
+        const cw = displayWidth(part.text);
         if (w + cw > avail && buf.length) {
-          chunks.push({ text: buf, start, end: idx });
-          start = idx;
+          chunks.push({ text: buf, start, end: part.start });
+          start = part.start;
           buf = "";
           w = 0;
         }
-        buf += ch;
+        buf += part.text;
         w += cw;
       });
-      chunks.push({ text: buf, start, end: chars.length });
+      chunks.push({ text: buf, start, end: line.length });
 
       chunks.forEach((chunk, ci) => {
         const rowIndex = rows.length;
-        rows.push((ci === 0 ? prefix : continuation) + chunk.text);
+        const rowPrefix = ci === 0 ? prefix : continuation;
+        rows.push(rowPrefix + chunk.text);
+        visualRows.push({
+          line: li,
+          start: chunk.start,
+          end: chunk.end,
+          prefixWidth: displayWidth(rowPrefix),
+          last: ci === chunks.length - 1,
+        });
         // where is the cursor inside this chunk?
         if (li === this.row && this.col >= chunk.start && (this.col < chunk.end || (ci === chunks.length - 1 && this.col <= chunk.end))) {
-          const before = chars.slice(chunk.start, Math.min(this.col, chunk.end)).join("");
+          const before = line.slice(chunk.start, Math.min(this.col, chunk.end));
           cursorRow = rowIndex;
           cursorCol = displayWidth(ci === 0 ? prefix : continuation) + displayWidth(before);
         }
       });
       // a cursor at the very end of a fully-filled last line
-      if (li === this.row && this.col === chars.length && chars.length === 0) {
+      if (li === this.row && this.col === line.length && line.length === 0) {
         cursorRow = rows.length - 1;
         cursorCol = displayWidth(prefix);
       }
     });
 
+    this.visualRows = visualRows;
     return { rows, cursorRow, cursorCol };
   }
 
   /** the highlighted completion, for the caller to draw */
   menuView(max = 8): { label: string; hint?: string; selected: boolean }[] {
-    const slice = this.menu.slice(0, max);
-    return slice.map((c, i) => ({ label: c.value, hint: c.hint, selected: i === this.menuIndex }));
+    const start = Math.max(0, Math.min(this.menuIndex - max + 1, Math.max(0, this.menu.length - max)));
+    const slice = this.menu.slice(start, start + max);
+    return slice.map((c, i) => ({ label: c.value, hint: c.hint, selected: start + i === this.menuIndex }));
   }
 
   attachmentChips(): string[] {

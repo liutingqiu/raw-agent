@@ -181,7 +181,11 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
 export const isImagePath = (p: string) => IMAGE_EXT.test(p);
 
 export function readImageFile(p: string): ClipboardResult {
-  const abs = path.resolve(p);
+  const trimmed = p.trim();
+  const input = trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))
+    ? trimmed.slice(1, -1)
+    : trimmed;
+  const abs = path.resolve(input);
   return readFileAsImage(abs, path.basename(abs)) ?? { ok: false, reason: `cannot read image: ${p}` };
 }
 

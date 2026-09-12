@@ -135,6 +135,16 @@ test("bash timeout terminates a long-running process", async () => {
   assert.ok(Date.now() - started < 5_000, result);
 });
 
+test("bash cancellation terminates a long-running process", async () => {
+  const command = `node -e "setTimeout(()=>{},10000)"`;
+  const ac = new AbortController();
+  const started = Date.now();
+  setTimeout(() => ac.abort(), 100);
+  const result = String(await runTool("bash", { command, timeout: 10_000 }, { ...ctx, signal: ac.signal }));
+  assert.match(result, /\[CANCELLED,/);
+  assert.ok(Date.now() - started < 5_000, result);
+});
+
 test("notes round-trip inside the configured data directory", async () => {
   const written = await runTool("notes", { action: "append", key: "Test Site", content: "iframe 里是登录框" }, ctx);
   assert.match(String(written), /Appended/);

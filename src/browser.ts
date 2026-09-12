@@ -1267,12 +1267,23 @@ function ensureRuntime(): Worker {
   return worker;
 }
 
-function runtimeRequest<T>(request: WorkerRequestWithoutId, timeoutMs: number, startupMs = 0): Promise<T> {
+function runtimeRequest<T>(request: WorkerRequestWithoutId, timeoutMs: number, startupMs = 0, signal?: AbortSignal): Promise<T> {
   const worker = ensureRuntime();
   worker.ref();
   const id = ++runtimeId;
   return new Promise<T>((resolve, reject) => {
     let timer: NodeJS.Timeout;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      runtimePending.delete(id);
+      cleanup();
+      const err = new Error("browser operation was cancelled");
+      reject(err);
+      stopRuntime(err);
+    };
     const arm = (ms: number) => {
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -1285,15 +1296,20 @@ function runtimeRequest<T>(request: WorkerRequestWithoutId, timeoutMs: number, s
     arm(timeoutMs + startupMs);
     runtimePending.set(id, {
       resolve: (value) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(value);
       },
       reject: (err) => {
-        clearTimeout(timer);
+        cleanup();
         reject(err);
       },
       ready: () => arm(timeoutMs + 500),
     });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
     worker.postMessage({ ...request, id });
   });
 }
@@ -1318,12 +1334,13 @@ export async function closeBrowser() {
 
 export async function runBrowserScript(
   script: string,
-  opts: { timeoutMs?: number; space?: string } = {},
+  opts: { timeoutMs?: number; space?: string; signal?: AbortSignal } = {},
 ): Promise<{ text: string; images?: ImagePart[] }> {
-  if (!isMainThread) return runBrowserScriptLocal(script, opts);
+  const { signal, ...workerOpts } = opts;
+  if (!isMainThread) return runBrowserScriptLocal(script, workerOpts);
   const timeout = opts.timeoutMs ?? 180_000;
   try {
-    return await runtimeRequest({ kind: "run", script, opts }, timeout, 35_000);
+    return await runtimeRequest({ kind: "run", script, opts: workerOpts }, timeout, 35_000, signal);
   } catch (err) {
     return { text: `Error: script failed — ${err instanceof Error ? err.message : String(err)}` };
   }

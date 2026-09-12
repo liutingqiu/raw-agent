@@ -249,8 +249,17 @@ agent 写给未来自己的持久文本 —— 某个站点的怪癖、某个项
 | `--session <file>` | 指定会话文件 |
 | `--max-turns <n>` | 单条消息内最多工具轮数（默认 64） |
 
+不带 `-p` 时，重定向的标准输入会作为一条提示词读取，并保留其中的换行：
+
+```bash
+printf '检查这个项目\n列出主要风险' | raw
+```
+
 会话内：`/help` `/goal` `/context` `/compact` `/model` `/provider` `/effort` `/reasoning`
 `/permission` `/paste` `/image` `/tools` `/notes` `/session` `/new` `/exit`
+
+用 `Ctrl+J` 或 `Shift+Enter` 输入换行，`Shift+Tab` 切换权限模式，`Esc` 或 `Ctrl+C`
+中止正在执行的请求或工具。输入为空时，Backspace 会移除最后一张图片附件。
 
 ### 环境变量
 

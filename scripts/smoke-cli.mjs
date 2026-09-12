@@ -61,7 +61,7 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ choices: [{ message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }] }));
 });
 
-function run(file, args, options) {
+function run(file, args, options, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, options);
     let stdout = "";
@@ -70,6 +70,7 @@ function run(file, args, options) {
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.once("error", reject);
     child.once("close", (code) => resolve({ code, stdout, stderr }));
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
@@ -175,6 +176,17 @@ try {
   assert.equal(empty.code, 2);
   assert.match(empty.stderr, /--print requires a non-empty prompt/);
   assert.equal(requests.length, beforeEmpty);
+
+  const pipedOptions = { ...childOptions(otherWorkspace), stdio: ["pipe", "pipe", "pipe"] };
+  const piped = await run(
+    process.execPath,
+    [cli, "--provider", "smoke", "--model", "smoke-model"],
+    pipedOptions,
+    "piped prompt\n",
+  );
+  assert.equal(piped.code, 0, piped.stderr || piped.stdout);
+  assert.match(piped.stdout, /resumed cleanly/);
+  assert.equal(requests.at(-1).messages.at(-1).content, "piped prompt");
   console.log("cli tool-loop, session restore, workspace isolation, and failure-exit smoke test passed");
 } finally {
   await new Promise((resolve) => server.close(resolve));

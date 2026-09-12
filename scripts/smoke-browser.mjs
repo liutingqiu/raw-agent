@@ -121,6 +121,14 @@ try {
   assert.equal(result.images?.length, 1);
   assert.equal(fs.readFileSync(path.join(downloads, "fixture.txt"), "utf8"), "download fixture");
 
+  const ac = new AbortController();
+  const cancelStarted = Date.now();
+  setTimeout(() => ac.abort(), 100);
+  const cancelled = await runBrowserScript("await sleep(10000)", { timeoutMs: 30_000, signal: ac.signal });
+  assert.match(cancelled.text, /cancelled/i);
+  assert.ok(Date.now() - cancelStarted < 5_000, cancelled.text);
+  console.log("browser cancellation passed");
+
   const started = Date.now();
   const timed = await runBrowserScript("while (true) {}", { timeoutMs: 100 });
   assert.match(timed.text, /terminated/);

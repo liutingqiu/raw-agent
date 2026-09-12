@@ -98,6 +98,7 @@ export function validateToolArguments(name: string, args: Record<string, any>): 
 export type ToolContext = {
   root: string;
   allowOutside: boolean;
+  signal?: AbortSignal;
   confirm?: (what: string) => Promise<boolean>;
   /** ask the human to do something in the real browser, then continue */
   handoff?: (message: string, timeoutMs: number) => Promise<string>;
@@ -360,9 +361,9 @@ export async function runTool(name: string, args: Record<string, any>, ctx: Tool
       case "grep":
         return await toolGrep(args, ctx);
       case "web_search":
-        return await toolWebSearch(args);
+        return await toolWebSearch(args, ctx);
       case "web_fetch":
-        return await toolWebFetch(args);
+        return await toolWebFetch(args, ctx);
       case "browser":
         return await toolBrowser(args, ctx);
       case "notes":
@@ -580,10 +581,10 @@ async function toolGrep(args: Record<string, any>, ctx: ToolContext): Promise<st
  * web_search / web_fetch
  * ------------------------------------------------------------------ */
 
-async function toolWebSearch(args: Record<string, any>): Promise<string> {
+async function toolWebSearch(args: Record<string, any>, ctx: ToolContext): Promise<string> {
   const query = String(args.query ?? "").trim();
   if (!query) return "Error: query is required";
-  const { engine, results, note } = await webSearch(query, { count: Number(args.count) || undefined, engine: args.engine });
+  const { engine, results, note } = await webSearch(query, { count: Number(args.count) || undefined, engine: args.engine, signal: ctx.signal });
   if (!results.length) {
     return `No results for "${query}". Tried: ${note ?? availableBackends().join(", ")}`;
   }
@@ -596,10 +597,10 @@ async function toolWebSearch(args: Record<string, any>): Promise<string> {
   return truncate(`${header}\n\n${lines.join("\n\n")}`, MAX_OUT);
 }
 
-async function toolWebFetch(args: Record<string, any>): Promise<string> {
+async function toolWebFetch(args: Record<string, any>, ctx: ToolContext): Promise<string> {
   const url = String(args.url ?? "").trim();
   if (!url) return "Error: url is required";
-  const r = await webFetch(url, { maxChars: Number(args.maxChars) || undefined, raw: args.raw === true });
+  const r = await webFetch(url, { maxChars: Number(args.maxChars) || undefined, raw: args.raw === true, signal: ctx.signal });
   const header = `${r.url} (${r.contentType.split(";")[0] || "unknown"})`;
   return truncate(`${header}\n\n${r.text}`, MAX_OUT);
 }
@@ -614,7 +615,11 @@ async function toolBrowser(args: Record<string, any>, ctx: ToolContext): Promise
   if (!script) return "Error: script is required (or pass status:true / close:true)";
   if (ctx.confirm && !(await ctx.confirm(`run a browser script (${script.length} chars)`))) return "Rejected by user.";
   setHandoffHook(ctx.handoff);
-  return runBrowserScript(script, { timeoutMs: Number(args.timeoutMs) || undefined, space: args.space ? String(args.space) : undefined });
+  return runBrowserScript(script, {
+    timeoutMs: Number(args.timeoutMs) || undefined,
+    space: args.space ? String(args.space) : undefined,
+    signal: ctx.signal,
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -770,14 +775,14 @@ async function toolBash(args: Record<string, any>, ctx: ToolContext): Promise<st
 
   const { file, argv } = shellInvocation(command);
   const started = Date.now();
-  const r = await exec(file, argv, ctx.root, timeout);
+  const r = await exec(file, argv, ctx.root, timeout, ctx.signal);
   const ms = Date.now() - started;
   const parts: string[] = [];
   if (r.stdout) parts.push(r.stdout);
   if (r.stderr) parts.push(r.stderr);
   let body = parts.join(r.stdout && r.stderr ? "\n" : "") || "(no output)";
   body = truncate(body, MAX_OUT);
-  const status = r.timedOut ? `TIMEOUT after ${timeout}ms` : `exit ${r.code}`;
+  const status = r.aborted ? "CANCELLED" : r.timedOut ? `TIMEOUT after ${timeout}ms` : `exit ${r.code}`;
   return `${body}\n\n[${status}, ${ms}ms]`;
 }
 
@@ -790,16 +795,17 @@ function shellInvocation(command: string): { file: string; argv: string[] } {
   return { file: process.env.SHELL || "/bin/sh", argv: ["-lc", command] };
 }
 
-type ExecResult = { code: number; stdout: string; stderr: string; timedOut: boolean };
+type ExecResult = { code: number; stdout: string; stderr: string; timedOut: boolean; aborted: boolean };
 
-function exec(file: string, argv: string[], cwd: string, timeoutMs: number): Promise<ExecResult> {
+function exec(file: string, argv: string[], cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult> {
   return new Promise((resolve) => {
     const child = spawn(file, argv, { cwd, windowsHide: true, env: process.env, detached: process.platform !== "win32" });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    let aborted = false;
+    let settled = false;
+    const terminate = () => {
       if (process.platform === "win32" && child.pid) {
         spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
       } else if (child.pid) {
@@ -809,7 +815,25 @@ function exec(file: string, argv: string[], cwd: string, timeoutMs: number): Pro
           child.kill("SIGKILL");
         }
       }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
     }, timeoutMs);
+    const onAbort = () => {
+      aborted = true;
+      terminate();
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+
+    const finish = (code: number, extraError = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ code, stdout, stderr: stderr + extraError, timedOut, aborted });
+    };
 
     child.stdout?.on("data", (d: Buffer) => {
       if (stdout.length < MAX_OUT * 2) stdout += d.toString();
@@ -818,12 +842,10 @@ function exec(file: string, argv: string[], cwd: string, timeoutMs: number): Pro
       if (stderr.length < MAX_OUT * 2) stderr += d.toString();
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: stderr + String(err), timedOut });
+      finish(-1, String(err));
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr, timedOut });
+      finish(code ?? -1);
     });
   });
 }

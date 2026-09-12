@@ -19,8 +19,9 @@ import { bold, dim, glyph, gradient, keyLabel, paint, theme } from "./theme.ts";
 /** a bordered box that respects display width */
 export function box(lines: string[], width: number, opts: { title?: string; color?: string } = {}): string[] {
   const color = opts.color ?? theme.accentDim;
-  const inner = Math.max(8, width - 4);
-  const title = opts.title ? ` ${opts.title} ` : "";
+  width = Math.max(4, width);
+  const inner = Math.max(0, width - 4);
+  const title = opts.title ? clip(` ${opts.title} `, Math.max(1, width - 2)) : "";
   const head = glyph.tl + glyph.h.repeat(Math.max(0, width - 2 - displayWidth(title))) + title + glyph.tr;
   const rows = [paint(head, color)];
   for (const line of lines) {
@@ -32,10 +33,20 @@ export function box(lines: string[], width: number, opts: { title?: string; colo
 
 /** a horizontal rule with an optional inline label */
 export function rule(width: number, label = ""): string {
+  if (width <= 0) return "";
   if (!label) return paint(glyph.h.repeat(Math.max(0, width)), theme.faint);
-  const text = ` ${label} `;
+  const text = ` ${clip(label, Math.max(1, width - 4))} `;
   const rest = Math.max(0, width - displayWidth(text) - 2);
-  return paint(glyph.h.repeat(2) + text + glyph.h.repeat(rest), theme.faint);
+  return pad(paint(glyph.h.repeat(Math.min(2, width)) + text + glyph.h.repeat(rest), theme.faint), width);
+}
+
+/** Keep a multiline editor inside the terminal while retaining the cursor row. */
+export function fitViewport(lines: string[], cursorRow: number, maxRows: number): { lines: string[]; cursorRow: number; start: number } {
+  maxRows = Math.max(1, Math.floor(maxRows));
+  if (lines.length <= maxRows) return { lines, cursorRow: Math.max(0, Math.min(cursorRow, lines.length - 1)), start: 0 };
+  const safeCursor = Math.max(0, Math.min(cursorRow, lines.length - 1));
+  const start = Math.max(0, Math.min(safeCursor - maxRows + 1, lines.length - maxRows));
+  return { lines: lines.slice(start, start + maxRows), cursorRow: safeCursor - start, start };
 }
 
 /** gradient usage meter */
@@ -199,7 +210,7 @@ export function startupLines(info: StartupInfo, width: number): string[] {
   rows.push(`${paint("raw", bold, theme.brand)} ${dim(`v${info.version}`)}   ${dim(info.configured ? "ready" : "no model configured — run `raw setup`")}`);
   rows.push("");
   rows.push(`${label("model")}${paint(info.provider, theme.accent)}${dim("/")}${paint(info.model, theme.accent)}  ${dim(`${info.effort} effort`)}`);
-  rows.push(`${label("workspace")}${dim(clip(info.workspace, Math.max(10, width - 16)))}`);
+  rows.push(`${label("workspace")}${dim(clip(info.workspace, Math.max(1, width - 16)))}`);
   rows.push(`${label("mode")}${paint(info.permission, theme.warn)}  ${dim(`${info.toolCount} tools`)}${info.proxy ? dim(`  proxy ${info.proxy}`) : ""}`);
   rows.push("");
   rows.push(dim(`${keyLabel("commands")} commands   ${keyLabel("files")} files   ${keyLabel("paste-image")} paste image   ? help`));
