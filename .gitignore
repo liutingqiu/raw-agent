@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.dist-build-*/
+.dist-build-lock/
+.dist-build-backup-*/
+.npm-cache/
+*.log
+
+# local agent data (never commit keys)
+.raw/
+.raw-notes/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

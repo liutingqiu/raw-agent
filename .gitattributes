@@ -1,0 +1,11 @@
+# The published CLI is executed directly, so a shebang must never carry a CR.
+* text=auto eol=lf
+
+# Windows launchers need CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# binary fixtures stay binary
+*.png binary
+*.jpg binary
+*.ico binary
