@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>raw browser-input probe</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
+    #field { width: 320px; padding: 8px; font-size: 14px; }
+    #editor { border: 1px solid #999; padding: 8px; min-height: 60px; width: 320px; margin-top: 12px; }
+    #monaco { border: 1px solid #999; width: 320px; height: 80px; margin-top: 12px; }
+    #canvas { position: relative; width: 420px; height: 200px; background: #f0f0f0; margin-top: 12px; }
+    #node { position: absolute; left: 20px; top: 80px; width: 60px; height: 40px; background: #3b82f6; }
+    #late { display: none; margin-top: 12px; }
+  </style>
+</head>
+
+<body>
+  <h1>probe</h1>
+  <input id="field" placeholder="controlled field">
+  <div id="editor" contenteditable="true"></div>
+  <div id="monaco"></div>
+  <div id="canvas"><div id="node"></div></div>
+  <div id="late">arrived</div>
+
+  <script>
+    /* ------------------------------------------------------------------ *
+     * 1. A React-style controlled field.
+     *
+     * React installs a valueTracker and re-defines `value` on the element
+     * instance. A plain `el.value = x` keeps the tracker in sync, so the
+     * input event that follows looks "unchanged" and onChange never fires.
+     * Only the prototype's native setter bypasses the instance override,
+     * which is exactly the difference being verified.
+     * ------------------------------------------------------------------ */
+    window.__probe = { reactOnChange: 0, reactInput: 0, editorInput: 0, drag: { down: 0, move: 0, up: 0 } };
+
+    (function installControlledField() {
+      const field = document.getElementById('field');
+      const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      let tracked = '';
+
+      field._valueTracker = {
+        getValue: () => tracked,
+        setValue: (next) => { tracked = String(next); },
+      };
+
+      Object.defineProperty(field, 'value', {
+        configurable: true,
+        get() { return proto.get.call(this); },
+        set(next) {
+          field._valueTracker.setValue(next);
+          proto.set.call(this, next);
+        },
+      });
+
+      field.addEventListener('input', () => {
+        window.__probe.reactInput++;
+        const current = proto.get.call(field);
+        if (current !== field._valueTracker.getValue()) {
+          window.__probe.reactOnChange++;
+          field._valueTracker.setValue(current);
+        }
+      });
+    })();
+
+    document.getElementById('editor').addEventListener('input', () => {
+      window.__probe.editorInput++;
+    });
+
+    /* ------------------------------------------------------------------ *
+     * 2. A canvas that only accepts a drag when the pointer actually
+     *    travels — the same threshold logic React Flow and Dify use.
+     *    Listeners sit on the document, like a real canvas library, so a
+     *    release anywhere is still observed.
+     * ------------------------------------------------------------------ */
+    (function installCanvas() {
+      const canvas = document.getElementById('canvas');
+      const events = window.__probe.drag;
+
+      document.addEventListener('pointerdown', () => { events.down++; });
+
+      document.addEventListener('pointermove', (event) => {
+        if (events.down === 0) return;
+        const rect = canvas.getBoundingClientRect();
+        const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        if (events.last && Math.hypot(point.x - events.last.x, point.y - events.last.y) < 1) return;
+        events.last = point;
+        events.move++;
+      });
+
+      document.addEventListener('pointerup', (event) => {
+        events.up++;
+        const rect = canvas.getBoundingClientRect();
+        events.droppedAt = { x: Math.round(event.clientX - rect.left), y: Math.round(event.clientY - rect.top) };
+      });
+    })();
+
+    /* ------------------------------------------------------------------ *
+     * 3. A Monaco stand-in: the real editor exposes getEditors() and no
+     *    DOM back-pointer, so element ownership is decided by the element's
+     *    position relative to getDomNode().
+     * ------------------------------------------------------------------ */
+    (function installMonacoStub() {
+      const host = document.getElementById('monaco');
+      const inner = document.createElement('div');
+      inner.className = 'monaco-editor';
+      host.appendChild(inner);
+
+      const written = [];
+      const fakeEditor = {
+        getDomNode: () => inner,
+        hasTextFocus: () => false,
+        setValue: (text) => { written.push(text); },
+      };
+
+      window.__probe.monacoWritten = written;
+      window.monaco = { editor: { getEditors: () => [fakeEditor] } };
+    })();
+
+    /* ------------------------------------------------------------------ *
+     * 4. A CodeMirror 5 stand-in using the real class contract.
+     * ------------------------------------------------------------------ */
+    (function installCodeMirrorStub() {
+      const cm = document.createElement('div');
+      cm.className = 'CodeMirror';
+      const inner = document.createElement('div');
+      cm.appendChild(inner);
+      document.body.appendChild(cm);
+
+      const written = [];
+      cm.CodeMirror = { setValue: (text) => { written.push(text); } };
+      window.__probe.codeMirrorWritten = written;
+    })();
+
+    /* ------------------------------------------------------------------ *
+     * 5. An element that appears late, to verify waitForMutation is
+     *    event driven rather than a fixed sleep.
+     * ------------------------------------------------------------------ */
+    window.revealLate = () => { document.getElementById('late').style.display = 'block'; };
+  </script>
+</body>
+
+</html>

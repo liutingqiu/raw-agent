@@ -24,7 +24,7 @@ function runBuild() {
 test("parallel builds publish one complete dist directory", async () => {
   const results = await Promise.all([runBuild(), runBuild(), runBuild(), runBuild()]);
   for (const result of results) assert.equal(result.code, 0, result.output);
-  for (const required of ["cli.js", "api.js", "tools.js", "tui/commands.js", "page-helpers.js"]) {
+  for (const required of ["browser-cli.js", "browser.js", "paths.js", "util.js", "page-helpers.js"]) {
     assert.equal(fs.existsSync(new URL(`../dist/${required}`, import.meta.url)), true, required);
   }
 });

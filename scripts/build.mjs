@@ -70,7 +70,7 @@ function verify(dir) {
   verify(OUT);
 
 // every module the entry point needs must exist
-  for (const required of ["cli.js", "api.js", "tools.js", "tui/theme.js", "tui/term.js", "tui/editor.js", "tui/ui.js", "tui/commands.js", "page-helpers.js"]) {
+  for (const required of ["browser-cli.js", "browser.js", "paths.js", "util.js", "page-helpers.js"]) {
     if (!fs.existsSync(new URL(required, OUT))) throw new Error(`dist/${required} is missing`);
   }
 

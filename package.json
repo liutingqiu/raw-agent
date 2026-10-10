@@ -1,22 +1,17 @@
 {
   "name": "raw-agent",
   "version": "0.4.0",
-  "description": "A bare model + tools loop in your terminal. No system prompt, no runtime dependencies, no scaffolding.",
+  "description": "A browser-only automation runtime for Chrome and Edge.",
   "keywords": [
     "ai",
     "agent",
-    "cli",
-    "coding-agent",
-    "llm",
-    "openai",
-    "anthropic",
     "browser-automation",
     "cdp"
   ],
   "license": "MIT",
   "type": "module",
   "bin": {
-    "raw": "dist/cli.js"
+    "raw": "dist/browser-cli.js"
   },
   "files": [
     "dist",
@@ -33,18 +28,14 @@
   "scripts": {
     "build": "node --no-warnings scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test && npm run build && node scripts/smoke-cli.mjs && node scripts/smoke-providers.mjs && node scripts/smoke-permissions.mjs && node scripts/smoke-setup.mjs",
+    "check": "npm run typecheck && npm test && npm run build && node scripts/smoke-browser.mjs",
     "prepublishOnly": "npm run check",
     "prepack": "node --no-warnings scripts/build.mjs",
-    "start": "node src/cli.ts",
-    "dev": "node src/cli.ts",
+    "start": "node src/browser-cli.ts",
+    "dev": "node src/browser-cli.ts",
     "test": "node --no-warnings --test",
-    "smoke:cli": "npm run build && node scripts/smoke-cli.mjs",
-    "smoke:providers": "npm run build && node scripts/smoke-providers.mjs",
-    "smoke:permissions": "npm run build && node scripts/smoke-permissions.mjs",
-    "smoke:setup": "npm run build && node scripts/smoke-setup.mjs",
     "smoke:browser": "npm run build && node scripts/smoke-browser.mjs",
-    "setup": "node src/cli.ts setup"
+    "browser": "node src/browser-cli.ts"
   },
   "repository": {
     "type": "git",

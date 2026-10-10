@@ -27,7 +27,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - name: the published entry point must boot
-        run: node dist/cli.js --help
+        run: node dist/browser-cli.js --help
       - name: verify the package manifest and tarball
         run: npm pack --dry-run
 

@@ -15,3 +15,9 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# Edge bridge build output
+edge-bridge/host/bin/
+edge-bridge/host/obj/
+edge-bridge/extension.pem
+edge-bridge/extension.crx

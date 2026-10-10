@@ -9,6 +9,14 @@ follow Semantic Versioning.
 
 - Prompts can be supplied through piped stdin, including multiline input.
 - An F2 `/settings` panel provides clickable and keyboard-accessible controls for context, permission, reasoning effort, and reasoning display.
+- `page.setValue()` writes into Monaco, CodeMirror 5/6, contenteditable and React-controlled fields, and reports which strategy actually ran; `fill()` routes through it, so code nodes and canvases stop silently dropping text.
+- `page.waitForMutation()` waits on an in-page MutationObserver rather than a polling loop, and `page.waitForResponse()` resolves on a matching network response with optional resource-type and status filters.
+- `dragAndDrop()` accepts raw `{x, y}` viewport coordinates alongside selectors and takes `steps`, `delay`, modifier keys and `dropDelay`; `page.mouseMove/mouseDown/mouseUp` expose the individual pointer steps.
+- `scripts/verify-browser-input.mjs` verifies the input layer against a real browser on an isolated throwaway profile, and reaps the instance it started.
+- Extension bridge surfaces that CDP cannot reach, ported from `reasonix-browser-bridge` (MIT): `page.proxy()` / `setProxy()` / `clearProxy()` for the network identity, `page.notify()` for system notifications, `page.history()` / `bookmarks()` / `extensions()` for profile reads, `page.insertCSS()` / `removeCSS()` for hiding page clutter, and `page.clearBrowsingData()`. The Edge extension declares the matching `bookmarks`, `browsingData`, `history`, `management`, `notifications`, `proxy` and `scripting` permissions; reloading it once in `edge://extensions` is required.
+- Cookie control (`page.cookies()` / `cookie()` / `setCookie()` / `removeCookie()`), tab properties (`page.updateTab()`), the browser's own downloader (`page.download()` / `cancelDownload()`), extension toggles (`page.setExtensionEnabled()`) and iframe enumeration including cross-origin frames (`page.frames()`).
+- Extension icons, without which `chrome.notifications` refuses to create anything and `page.notify()` could never have worked; `Raw.notify` now resolves whatever icon the manifest declares instead of a fixed path.
+- `scripts/raw-bridge.mjs`, a dependency-free client for the bridge so any session, script or human can drive the user's own browser without starting an agent run. It covers tabs, navigation, evaluation, snapshots, clicking, filling, screenshots, cookies, proxy, history, bookmarks, extensions, iframes and notifications, plus a `call` escape hatch for any `Raw.*` or CDP method. Everything prints JSON and exits non-zero on failure.
 
 ### Fixed
 
@@ -23,6 +31,11 @@ follow Semantic Versioning.
 - Escape and Ctrl+C now cancel model retries and long-running shell, browser, and web tools without wedging the session.
 - Timed prompts clear their state, cancelled browser handoffs are reported accurately, and terminal modes restore only once on exit.
 - Setup menus accept exact item names, and already-ended non-interactive stdin no longer hangs setup.
+- Extension bridge mode dialled the default 9222 debug port instead of the bridge's own 9333, so it failed or attached to the wrong browser unless `RAW_BROWSER_PORT` was set by hand; the token and port are now read from `~/.raw/edge-bridge.json`, making `RAW_BROWSER_EXTERNAL_BRIDGE=1` sufficient on its own.
+- A page holding a single Monaco instance swallowed every `setValue` call, including writes aimed at plain inputs and contenteditable regions that had nothing to do with the editor. The single-editor fallback now requires the target to be part of an editor.
+- The `browser` tool advertised `page.mouse.click/down/up/wheel`, none of which existed on `PageHandle`; the description now matches the real surface.
+- `Raw.insertCSS` and every cookie call silently required a host permission the extension never declared, so they would have failed at runtime. The manifest now lists `<all_urls>` plus the `activeTab`, `cookies` and `webNavigation` permissions those surfaces need.
+- Reloading the extension left the previous bridge host still holding port 9333, so the replacement could not bind while the old one had no extension attached any more — every request then timed out with no visible cause. A browser-launched host now retires earlier instances before binding; running the executable by hand still leaves a working bridge alone.
 
 ## [0.4.0] - 2026-09-12
 

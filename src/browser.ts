@@ -13,11 +13,38 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { isMainThread, parentPort, Worker } from "node:worker_threads";
 import { truncate } from "./util.ts";
-import { BROWSER_PROFILE, DOWNLOAD_DIR, ensureDir } from "./paths.ts";
-import type { ImagePart } from "./tools.ts";
+import { BROWSER_PROFILE, CONFIG_DIR, DOWNLOAD_DIR, ensureDir } from "./paths.ts";
 
+export type ImagePart = { mime: string; data: string };
+
+const EXTERNAL_BRIDGE = process.env.RAW_BROWSER_EXTERNAL_BRIDGE === "1";
+
+/**
+ * The installer writes {version, token, port} to ~/.raw/edge-bridge.json, and
+ * the bridge host rejects unauthenticated requests. Reading that file here is
+ * what makes extension mode work from a single environment variable, instead
+ * of making the user copy the token across by hand.
+ */
+export function readBridgeConfig(configDir: string): { token?: string; port?: number } {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(configDir, "edge-bridge.json"), "utf8"),
+    ) as { token?: unknown; port?: unknown };
+    return {
+      token: typeof parsed.token === "string" && parsed.token.length > 0 ? parsed.token : undefined,
+      port: typeof parsed.port === "number" && Number.isInteger(parsed.port) ? parsed.port : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+const BRIDGE_CONFIG = EXTERNAL_BRIDGE ? readBridgeConfig(CONFIG_DIR) : {};
+const BRIDGE_TOKEN = process.env.RAW_BROWSER_BRIDGE_TOKEN ?? BRIDGE_CONFIG.token;
+/** edge-bridge/host/Program.cs binds this fixed port in extension mode */
+const BRIDGE_PORT = BRIDGE_CONFIG.port ?? 9333;
 const configuredPort = process.env.RAW_BROWSER_PORT;
-const PORT = configuredPort === undefined ? 9222 : Number(configuredPort);
+const PORT = configuredPort === undefined ? (EXTERNAL_BRIDGE ? BRIDGE_PORT : 9222) : Number(configuredPort);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error(`invalid RAW_BROWSER_PORT "${configuredPort}" (expected 1-65535)`);
 }
@@ -25,6 +52,12 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const HEADLESS = process.env.RAW_BROWSER_HEADLESS === "1";
 const PROFILE = process.env.RAW_BROWSER_PROFILE || BROWSER_PROFILE;
 const BROWSER_MARKER = path.join(PROFILE, ".raw-browser.json");
+
+function debuggerFetch(pathname: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  if (BRIDGE_TOKEN) headers.set("X-Raw-Bridge-Token", BRIDGE_TOKEN);
+  return fetch(`${BASE}${pathname}`, { ...init, headers });
+}
 
 /* ------------------------------------------------------------------ *
  * CDP transport
@@ -35,6 +68,7 @@ class Cdp {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private listeners = new Map<string, Set<(params: any) => void>>();
+  private closeListeners = new Set<() => void>();
   closed = false;
 
   private constructor(ws: WebSocket) {
@@ -55,26 +89,37 @@ class Cdp {
       }
       if (msg.method) for (const cb of this.listeners.get(msg.method) ?? []) cb(msg.params);
     });
-    ws.addEventListener("close", () => {
-      this.closed = true;
-      for (const p of this.pending.values()) p.reject(new Error("browser connection closed"));
-      this.pending.clear();
-    });
-    ws.addEventListener("error", () => {
-      this.closed = true;
-    });
+    ws.addEventListener("close", () => this.markClosed());
+    ws.addEventListener("error", () => this.markClosed());
+  }
+
+  private markClosed() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const p of this.pending.values()) p.reject(new Error("browser connection closed"));
+    this.pending.clear();
+    for (const cb of this.closeListeners) cb();
+    this.closeListeners.clear();
   }
 
   static connect(url: string, timeoutMs = 15_000): Promise<Cdp> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
+      const endpoint = (() => {
+        try {
+          const parsed = new URL(url);
+          return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+        } catch {
+          return "browser debugger";
+        }
+      })();
       const timer = setTimeout(() => {
         try {
           ws.close();
         } catch {
           /* ignore */
         }
-        reject(new Error(`timed out connecting to ${url}`));
+        reject(new Error(`timed out connecting to ${endpoint}`));
       }, timeoutMs);
       ws.addEventListener("open", () => {
         clearTimeout(timer);
@@ -82,7 +127,7 @@ class Cdp {
       });
       ws.addEventListener("error", () => {
         clearTimeout(timer);
-        reject(new Error(`cannot connect to ${url}`));
+        reject(new Error(`cannot connect to ${endpoint}`));
       });
     });
   }
@@ -114,6 +159,15 @@ class Cdp {
     if (!set) this.listeners.set(event, (set = new Set()));
     set.add(cb);
     return () => set!.delete(cb);
+  }
+
+  onClosed(cb: () => void): () => void {
+    if (this.closed) {
+      cb();
+      return () => {};
+    }
+    this.closeListeners.add(cb);
+    return () => this.closeListeners.delete(cb);
   }
 
   close() {
@@ -158,31 +212,34 @@ type DebuggerInfo = { Browser?: string; webSocketDebuggerUrl?: string };
 
 async function debuggerAlive(): Promise<DebuggerInfo | null> {
   try {
-    const res = await fetch(`${BASE}/json/version`, { signal: AbortSignal.timeout(1500) });
+    const res = await debuggerFetch("/json/version", { signal: AbortSignal.timeout(1500) });
     if (!res.ok) return null;
     const info = (await res.json()) as DebuggerInfo;
     return info && typeof info === "object" ? info : null;
   } catch {
     return null;
   }
+
 }
 
 async function launchBrowser(): Promise<void> {
   const exe = findBrowser();
   if (!exe) throw new Error("no Chrome/Edge found. Set RAW_BROWSER_PATH to the executable.");
 
-  ensureDir(PROFILE);
-  const args = [
-    `--remote-debugging-port=${PORT}`,
-    `--user-data-dir=${PROFILE}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-background-networking",
-    "--disable-features=Translate,MediaRouter",
-    "--disable-popup-blocking",
-    "about:blank",
-  ];
-  if (HEADLESS) args.unshift("--headless=new");
+  if (!EXTERNAL_BRIDGE) ensureDir(PROFILE);
+  const args = EXTERNAL_BRIDGE
+    ? ["--profile-directory=Default", "about:blank"]
+    : [
+        `--remote-debugging-port=${PORT}`,
+        `--user-data-dir=${PROFILE}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-features=Translate,MediaRouter",
+        "--disable-popup-blocking",
+        "about:blank",
+      ];
+  if (HEADLESS && !EXTERNAL_BRIDGE) args.unshift("--headless=new");
 
   const child = spawn(exe, args, { detached: true, stdio: "ignore" });
   child.unref();
@@ -192,12 +249,14 @@ async function launchBrowser(): Promise<void> {
     await new Promise((r) => setTimeout(r, 400));
     const info = await debuggerAlive();
     if (info?.webSocketDebuggerUrl) {
-      fs.writeFileSync(BROWSER_MARKER, JSON.stringify({
-        port: PORT,
-        pid: child.pid,
-        profile: PROFILE,
-        webSocketDebuggerUrl: info.webSocketDebuggerUrl,
-      }));
+      if (!EXTERNAL_BRIDGE) {
+        fs.writeFileSync(BROWSER_MARKER, JSON.stringify({
+          port: PORT,
+          pid: child.pid,
+          profile: PROFILE,
+          webSocketDebuggerUrl: info.webSocketDebuggerUrl,
+        }));
+      }
       return;
     }
   }
@@ -205,6 +264,7 @@ async function launchBrowser(): Promise<void> {
 }
 
 function ownsDefaultDebugger(info: DebuggerInfo): boolean {
+  if (EXTERNAL_BRIDGE) return info.Browser?.startsWith("RawEdgeBridge/") === true;
   if (process.env.RAW_BROWSER_PORT) return true;
   try {
     const marker = JSON.parse(fs.readFileSync(BROWSER_MARKER, "utf8"));
@@ -229,14 +289,14 @@ async function ensureBrowser(): Promise<void> {
 
 async function pickPageTarget(): Promise<string> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`${BASE}/json/list`, { signal: AbortSignal.timeout(5000) });
+    const res = await debuggerFetch("/json/list", { signal: AbortSignal.timeout(5000) });
     const targets = (await res.json()) as any[];
     const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
     if (page) return page.webSocketDebuggerUrl as string;
 
     for (const method of ["PUT", "GET"]) {
       try {
-        const created = await fetch(`${BASE}/json/new?about:blank`, { method, signal: AbortSignal.timeout(5000) });
+        const created = await debuggerFetch("/json/new?about:blank", { method, signal: AbortSignal.timeout(5000) });
         if (created.ok) {
           const j = (await created.json()) as { webSocketDebuggerUrl?: string };
           if (j.webSocketDebuggerUrl) return j.webSocketDebuggerUrl;
@@ -254,27 +314,77 @@ async function pickPageTarget(): Promise<string> {
  * tab registry
  * ------------------------------------------------------------------ */
 
-type TargetInfo = { id: string; type: string; url: string; webSocketDebuggerUrl?: string };
+type TargetInfo = {
+  id: string;
+  type: string;
+  title?: string;
+  url: string;
+  active?: boolean;
+  windowId?: number;
+  webSocketDebuggerUrl?: string;
+};
+type TabSelector = string | { id?: string; url?: string };
 
 /** every page this process has a live CDP connection to */
 const attached = new Set<string>();
 const connections = new Set<Cdp>();
 
 async function listTargets(): Promise<TargetInfo[]> {
-  const res = await fetch(`${BASE}/json/list`, { signal: AbortSignal.timeout(5000) });
+  const res = await debuggerFetch("/json/list", { signal: AbortSignal.timeout(5000) });
   return (await res.json()) as TargetInfo[];
 }
 
-async function newPageTarget(url: string): Promise<TargetInfo> {
+async function newPageTarget(url: string, active = true): Promise<TargetInfo> {
   for (const method of ["PUT", "GET"]) {
     try {
-      const res = await fetch(`${BASE}/json/new?${encodeURIComponent(url)}`, { method, signal: AbortSignal.timeout(5000) });
+      const res = await debuggerFetch(`/json/new?${encodeURIComponent(url)}`, {
+        method,
+        headers: { "X-Raw-Tab-Active": active ? "1" : "0" },
+        signal: AbortSignal.timeout(5000),
+      });
       if (res.ok) return (await res.json()) as TargetInfo;
     } catch {
       /* try the other verb */
     }
   }
   throw new Error("could not open a new tab");
+}
+
+function targetIdFromWebSocketUrl(wsUrl: string): string {
+  const match = /\/devtools\/page\/([^/?#]+)/.exec(new URL(wsUrl).pathname);
+  if (!match) throw new Error(`cannot determine target id from debugger URL: ${wsUrl}`);
+  return decodeURIComponent(match[1]);
+}
+
+async function resolvePageTarget(selector: TabSelector): Promise<TargetInfo> {
+  const targets = (await listTargets()).filter((target) => target.type === "page");
+  const matches = typeof selector === "string"
+    ? targets.filter((target) => target.id === selector || target.url === selector)
+    : targets.filter((target) =>
+        (selector.id === undefined || target.id === selector.id) &&
+        (selector.url === undefined || target.url === selector.url)
+      );
+  if (matches.length === 0) throw new Error(`no page tab matched ${JSON.stringify(selector)}`);
+  if (matches.length > 1) throw new Error(`multiple page tabs matched ${JSON.stringify(selector)}; select by tab id`);
+  if (!matches[0].webSocketDebuggerUrl) throw new Error(`tab ${matches[0].id} has no debugger URL`);
+  return matches[0];
+}
+
+async function targetHttpAction(action: "activate" | "close", targetId: string): Promise<void> {
+  let lastError = "";
+  for (const method of ["PUT", "GET"]) {
+    try {
+      const res = await debuggerFetch(`/json/${action}/${encodeURIComponent(targetId)}`, {
+        method,
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) return;
+      lastError = `${res.status} ${await res.text()}`.trim();
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new Error(`could not ${action} tab ${targetId}${lastError ? `: ${lastError}` : ""}`);
 }
 
 async function enableDomains(cdp: Cdp) {
@@ -286,9 +396,14 @@ async function enableDomains(cdp: Cdp) {
 async function attachPage(wsUrl: string): Promise<{ cdp: Cdp; page: PageHandle }> {
   const cdp = await Cdp.connect(wsUrl);
   await enableDomains(cdp);
+  const knownTargetIds = new Set((await listTargets()).filter((target) => target.type === "page").map((target) => target.id));
   attached.add(wsUrl);
   connections.add(cdp);
-  return { cdp, page: new PageHandle(cdp, wsUrl) };
+  cdp.onClosed(() => {
+    attached.delete(wsUrl);
+    connections.delete(cdp);
+  });
+  return { cdp, page: new PageHandle(cdp, wsUrl, knownTargetIds) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -328,7 +443,7 @@ let browserCdp: Cdp | null = null;
 async function ensureBrowserCdp(): Promise<Cdp> {
   if (browserCdp && !browserCdp.closed) return browserCdp;
   await ensureBrowser();
-  const res = await fetch(`${BASE}/json/version`, { signal: AbortSignal.timeout(5000) });
+  const res = await debuggerFetch("/json/version", { signal: AbortSignal.timeout(5000) });
   const info = (await res.json()) as { webSocketDebuggerUrl?: string };
   if (!info.webSocketDebuggerUrl) throw new Error("browser exposed no browser-level debugger url");
 
@@ -514,20 +629,72 @@ function keyParams(chord: string) {
 
 type DialogPolicy = "accept" | "dismiss";
 
+/** a drag endpoint is an element locator or raw viewport coordinates */
+type DragPoint = { x: number; y: number };
+type DragTarget = number | string | DragPoint;
+
+/** CDP Input.dispatchMouseEvent modifier bitmask */
+const MODIFIER_BITS: Record<string, number> = {
+  alt: 1,
+  ctrl: 2,
+  control: 2,
+  meta: 4,
+  command: 4,
+  cmd: 4,
+  shift: 8,
+};
+
+const BUTTON_BITS: Record<string, number> = { left: 1, right: 2, middle: 4 };
+
+export function modifierMask(modifiers?: string[]): number {
+  let mask = 0;
+  for (const name of modifiers ?? []) mask |= MODIFIER_BITS[String(name).toLowerCase()] ?? 0;
+  return mask;
+}
+
+/**
+ * Rounded points from a to b, excluding the start and including the end.
+ * Canvas editors judge "drag" against "click" by the distance travelled
+ * between pointermove events, so teleporting to the target reads as a click.
+ */
+export function interpolatePath(from: DragPoint, to: DragPoint, steps: number): DragPoint[] {
+  const count = Math.max(1, Math.min(Math.floor(steps), 200));
+  const points: DragPoint[] = [];
+  for (let i = 1; i <= count; i++) {
+    points.push({
+      x: Math.round(from.x + ((to.x - from.x) * i) / count),
+      y: Math.round(from.y + ((to.y - from.y) * i) / count),
+    });
+  }
+  return points;
+}
+
+function isDragPoint(target: DragTarget): target is DragPoint {
+  return typeof target === "object" && target !== null && "x" in target && "y" in target;
+}
+
+function describeDragTarget(target: DragTarget): string {
+  return isDragPoint(target) ? `${Math.round(target.x)},${Math.round(target.y)}` : String(target);
+}
+
 class PageHandle {
   private cdp: Cdp;
   private wsUrl: string;
+  private knownTargetIds: Set<string>;
   private installed = false;
   private dialogPolicy: DialogPolicy = "accept";
   private lastDialog: { type: string; message: string; at: number } | null = null;
   private netInFlight = 0;
   private lastNetworkAt = Date.now();
+  /** last known pointer position, so an interpolated move has an origin */
+  private pointer: DragPoint | null = null;
 
   private chooser: { backendNodeId?: number; mode?: string } | null = null;
 
-  constructor(cdp: Cdp, wsUrl: string) {
+  constructor(cdp: Cdp, wsUrl: string, knownTargetIds: Set<string>) {
     this.cdp = cdp;
     this.wsUrl = wsUrl;
+    this.knownTargetIds = knownTargetIds;
     cdp.on("Page.fileChooserOpened", (p) => {
       this.chooser = { backendNodeId: p.backendNodeId, mode: p.mode };
     });
@@ -595,8 +762,8 @@ class PageHandle {
   /* ---------------------------- pages ---------------------------- */
 
   /** open a new tab and return its own handle */
-  async newTab(url = "about:blank"): Promise<PageHandle> {
-    const target = await newPageTarget(url);
+  async newTab(url = "about:blank", opts: { active?: boolean } = {}): Promise<PageHandle> {
+    const target = await newPageTarget(url, opts.active !== false);
     if (!target.webSocketDebuggerUrl) throw new Error("new tab has no debugger url");
     const page = (await attachPage(target.webSocketDebuggerUrl)).page;
     if (url !== "about:blank") {
@@ -611,18 +778,85 @@ class PageHandle {
     return page;
   }
 
+  /** attach to one existing tab by exact target id or exact URL */
+  async attachTab(selector: TabSelector): Promise<PageHandle> {
+    const target = await resolvePageTarget(selector);
+    return (await attachPage(target.webSocketDebuggerUrl!)).page;
+  }
+
+  /** activate and attach to one existing tab by exact target id or exact URL */
+  async switchTab(selector: TabSelector): Promise<PageHandle> {
+    const target = await resolvePageTarget(selector);
+    await targetHttpAction("activate", target.id);
+    return (await attachPage(target.webSocketDebuggerUrl!)).page;
+  }
+
+  /** activate this tab, or another tab selected by exact target id or URL */
+  async activateTab(selector?: TabSelector): Promise<void> {
+    const targetId = selector === undefined ? targetIdFromWebSocketUrl(this.wsUrl) : (await resolvePageTarget(selector)).id;
+    await targetHttpAction("activate", targetId);
+  }
+
+  /** close the actual Edge/Chrome tab, not just this JavaScript handle */
+  async closeTab(selector?: TabSelector): Promise<void> {
+    const currentId = targetIdFromWebSocketUrl(this.wsUrl);
+    const targetId = selector === undefined ? currentId : (await resolvePageTarget(selector)).id;
+    await targetHttpAction("close", targetId);
+    if (targetId === currentId) this.close();
+  }
+
+  /** restore Edge's most recently closed tab through the extension bridge */
+  async restoreClosedTab(): Promise<{ tab?: TargetInfo; window?: { id?: number; tabs?: TargetInfo[] } }> {
+    const res = await debuggerFetch("/json/restore", { method: "POST", signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`could not restore the most recently closed tab: ${res.status} ${await res.text()}`.trim());
+    return (await res.json()) as { tab?: TargetInfo; window?: { id?: number; tabs?: TargetInfo[] } };
+  }
+
+  /** stable CDP target id for this handle */
+  targetId(): string {
+    return targetIdFromWebSocketUrl(this.wsUrl);
+  }
+
   /**
    * A click that opens a new tab leaves this handle behind — call this to get a
-   * handle for the popup. Polls until a page appears that is not already attached.
+   * handle for the popup. Only considers tabs created after this handle was made.
+   * Prefer waitForPopup(action) when unrelated tabs may open concurrently.
    */
   async followPopup(opts: { timeoutMs?: number } = {}): Promise<PageHandle> {
     const deadline = Date.now() + (opts.timeoutMs ?? 8000);
     while (Date.now() < deadline) {
       const targets = await listTargets();
-      const fresh = targets.filter((t) => t.type === "page" && t.webSocketDebuggerUrl && !attached.has(t.webSocketDebuggerUrl));
+      const fresh = targets.filter((t) =>
+        t.type === "page" &&
+        t.webSocketDebuggerUrl &&
+        !this.knownTargetIds.has(t.id) &&
+        !attached.has(t.webSocketDebuggerUrl)
+      );
       const pick = fresh[fresh.length - 1];
-      if (pick?.webSocketDebuggerUrl) return (await attachPage(pick.webSocketDebuggerUrl)).page;
+      if (pick?.webSocketDebuggerUrl) {
+        this.knownTargetIds.add(pick.id);
+        return (await attachPage(pick.webSocketDebuggerUrl)).page;
+      }
       await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error("no new tab appeared");
+  }
+
+  /** run an action and attach only to a tab created after that action began */
+  async waitForPopup(action: () => Promise<unknown>, opts: { timeoutMs?: number } = {}): Promise<PageHandle> {
+    const before = new Set((await listTargets()).filter((target) => target.type === "page").map((target) => target.id));
+    await action();
+    const deadline = Date.now() + (opts.timeoutMs ?? 8000);
+    while (Date.now() < deadline) {
+      const targets = await listTargets();
+      const pick = targets.find((target) =>
+        target.type === "page" && target.webSocketDebuggerUrl && !before.has(target.id)
+      );
+      if (pick?.webSocketDebuggerUrl) {
+        this.knownTargetIds.add(pick.id);
+        return (await attachPage(pick.webSocketDebuggerUrl)).page;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
     throw new Error("no new tab appeared");
   }
@@ -632,7 +866,14 @@ class PageHandle {
     const targets = await listTargets();
     return targets
       .filter((t) => t.type === "page")
-      .map((t) => ({ url: t.url, attached: attached.has(t.webSocketDebuggerUrl ?? "") }));
+      .map((t) => ({
+        id: t.id,
+        title: t.title ?? "",
+        url: t.url,
+        active: t.active,
+        windowId: t.windowId,
+        attached: attached.has(t.webSocketDebuggerUrl ?? ""),
+      }));
   }
 
   close() {
@@ -768,47 +1009,135 @@ class PageHandle {
     return `hovered ${String(selector)}`;
   }
 
-  async dragAndDrop(source: number | string, target: number | string) {
-    const a = await this.elementBox(source);
-    const b = await this.elementBox(target);
-    await this.mouseMove(a.x, a.y);
-    await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: a.x, y: a.y, button: "left", clickCount: 1 });
-    for (let i = 1; i <= 8; i++) {
-      await this.cdp.send("Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: a.x + ((b.x - a.x) * i) / 8,
-        y: a.y + ((b.y - a.y) * i) / 8,
-        button: "left",
-        buttons: 1,
-      });
-    }
-    await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: b.x, y: b.y, button: "left", clickCount: 1 });
-    return `dragged ${String(source)} → ${String(target)}`;
+  private async resolveDragPoint(target: DragTarget): Promise<DragPoint> {
+    if (isDragPoint(target)) return { x: Number(target.x), y: Number(target.y) };
+    const box = await this.elementBox(target as number | string);
+    return { x: box.x, y: box.y };
   }
 
-  mouseMove(x: number, y: number) {
-    return this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  /** move the pointer; steps > 1 interpolates from the last known position */
+  async mouseMove(x: number, y: number, opts: { steps?: number; delay?: number; modifiers?: string[] } = {}) {
+    const steps = Math.max(1, Math.min(Math.floor(opts.steps ?? 1), 200));
+    const delay = Math.max(0, opts.delay ?? 0);
+    const modifiers = modifierMask(opts.modifiers);
+    const from = this.pointer;
+    if (steps === 1 || !from) {
+      this.pointer = { x, y };
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, modifiers });
+      return `moved to ${Math.round(x)},${Math.round(y)}`;
+    }
+    for (const point of interpolatePath(from, { x, y }, steps)) {
+      this.pointer = point;
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, modifiers });
+      if (delay) await this.sleep(delay);
+    }
+    return `moved to ${Math.round(x)},${Math.round(y)} in ${steps} steps`;
+  }
+
+  /** press and hold a mouse button at a viewport point */
+  async mouseDown(
+    x: number,
+    y: number,
+    opts: { button?: "left" | "right" | "middle"; modifiers?: string[]; clickCount?: number } = {},
+  ) {
+    const button = opts.button ?? "left";
+    this.pointer = { x, y };
+    await this.cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button,
+      buttons: BUTTON_BITS[button] ?? 1,
+      clickCount: opts.clickCount ?? 1,
+      modifiers: modifierMask(opts.modifiers),
+    });
+    return `mouse down (${button}) at ${Math.round(x)},${Math.round(y)}`;
+  }
+
+  /** release a held mouse button at a viewport point */
+  async mouseUp(
+    x: number,
+    y: number,
+    opts: { button?: "left" | "right" | "middle"; modifiers?: string[]; clickCount?: number } = {},
+  ) {
+    const button = opts.button ?? "left";
+    this.pointer = { x, y };
+    await this.cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button,
+      buttons: 0,
+      clickCount: opts.clickCount ?? 1,
+      modifiers: modifierMask(opts.modifiers),
+    });
+    return `mouse up (${button}) at ${Math.round(x)},${Math.round(y)}`;
+  }
+
+  /**
+   * Drag a locator or a raw viewport point onto another. Canvas editors
+   * (React Flow, Konva, tldraw, Dify) decide "drag" versus "click" from how
+   * far the pointer travelled between moves, so the whole path is paced
+   * instead of teleporting to the target.
+   */
+  async dragAndDrop(
+    source: DragTarget,
+    target: DragTarget,
+    opts: { steps?: number; delay?: number; modifiers?: string[]; dropDelay?: number } = {},
+  ) {
+    const a = await this.resolveDragPoint(source);
+    const b = await this.resolveDragPoint(target);
+    const steps = Math.max(1, Math.min(Math.floor(opts.steps ?? 12), 200));
+    const delay = Math.max(0, opts.delay ?? 8);
+    const modifiers = modifierMask(opts.modifiers);
+
+    await this.mouseMove(a.x, a.y);
+    await this.mouseDown(a.x, a.y, { modifiers: opts.modifiers });
+    if (delay) await this.sleep(delay);
+
+    for (const point of interpolatePath(a, b, steps)) {
+      await this.cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        button: "left",
+        buttons: 1,
+        modifiers,
+      });
+      if (delay) await this.sleep(delay);
+    }
+    this.pointer = b;
+
+    if (opts.dropDelay) await this.sleep(opts.dropDelay);
+    await this.mouseUp(b.x, b.y, { modifiers: opts.modifiers });
+    return `dragged ${describeDragTarget(source)} → ${describeDragTarget(target)} (${steps} steps)`;
+  }
+
+  /**
+   * Write text into a field. Rich editors own their own document model, so a
+   * plain `el.value = x` is silently discarded there. The page-side helper
+   * probes Monaco, CodeMirror 5/6 and contenteditable first, then reports
+   * which strategy actually ran, so a no-op is never mistaken for a write.
+   */
+  async setValue(
+    selector: number | string,
+    value: string,
+    opts: { append?: boolean; notifyChange?: boolean } = {},
+  ) {
+    await this.ensureHelpers();
+    const options = { append: opts.append === true, notifyChange: opts.notifyChange !== false };
+    const res = (await this.evaluate(
+      `window.__mai.setValue(${JSON.stringify(selector)}, ${JSON.stringify(value)}, ${JSON.stringify(options)})`,
+    )) as { ok: boolean; strategy: string; detail?: string; length?: number } | null;
+    if (!res || !res.ok) {
+      throw new Error(`could not write into ${String(selector)}: ${res?.detail ?? "the page returned no result"}`);
+    }
+    return { strategy: res.strategy, length: res.length ?? String(value).length };
   }
 
   async fill(selector: number | string, value: string, opts: { clearFirst?: boolean } = {}) {
-    await this.ensureHelpers();
-    const res = await this.evaluate(`(() => {
-      const el = window.__mai.find(${JSON.stringify(selector)});
-      if (!el) return null;
-      el.scrollIntoView({ block: 'center' });
-      el.focus();
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      const next = ${opts.clearFirst === false ? "String(el.value || '') + " : ""}${JSON.stringify(value)};
-      if (setter && 'value' in el) setter.call(el, next);
-      else if (el.isContentEditable) el.textContent = next;
-      else el.value = next;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return String(next).slice(0, 60);
-    })()`);
-    if (res === null) throw new Error(`element not found: ${String(selector)}`);
-    return `filled ${String(selector)} with "${res}"`;
+    const res = await this.setValue(selector, value, { append: opts.clearFirst === false });
+    return `filled ${String(selector)} with "${String(value).slice(0, 60)}" via ${res.strategy}`;
   }
 
   /** keeps the old name working */
@@ -896,6 +1225,104 @@ class PageHandle {
       await new Promise((r) => setTimeout(r, 200));
     }
     throw new Error(`timed out waiting for ${selector} to be ${state}`);
+  }
+
+  /**
+   * Resolve when this page receives a network response the predicate accepts.
+   * The predicate runs in the host process, so it can inspect status, url,
+   * headers and resource type instead of being serialised into the page.
+   */
+  async waitForResponse(
+    predicate:
+      | string
+      | RegExp
+      | ((response: { url: string; status: number; mimeType?: string; resourceType?: string; headers?: Record<string, string> }) => boolean),
+    opts: { timeout?: number; resourceType?: string; status?: number } = {},
+  ) {
+    const timeout = opts.timeout ?? 30_000;
+    const wantedType = opts.resourceType?.toLowerCase();
+    return await new Promise<string>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let off: (() => void) | undefined;
+      const stop = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        if (off) off();
+      };
+      off = this.cdp.on("Network.responseReceived", (p: any) => {
+        const response = {
+          url: String(p?.response?.url ?? ""),
+          status: Number(p?.response?.status ?? 0),
+          mimeType: p?.response?.mimeType as string | undefined,
+          resourceType: p?.type as string | undefined,
+          headers: p?.response?.headers as Record<string, string> | undefined,
+        };
+        if (wantedType && String(response.resourceType ?? "").toLowerCase() !== wantedType) return;
+        if (opts.status !== undefined && response.status !== opts.status) return;
+        const hit =
+          typeof predicate === "function"
+            ? predicate(response)
+            : predicate instanceof RegExp
+              ? predicate.test(response.url)
+              : response.url.includes(String(predicate));
+        if (!hit) return;
+        stop();
+        resolve(`${response.status} ${response.url}`);
+      });
+      timer = setTimeout(() => {
+        stop();
+        reject(new Error(`timed out after ${timeout}ms waiting for a matching response`));
+      }, timeout);
+    });
+  }
+
+  /**
+   * Wait for a DOM change that makes the condition true, driven by a
+   * MutationObserver inside the page instead of a polling loop. Resolves as
+   * soon as the mutation lands, so a slow canvas editor costs nothing.
+   */
+  async waitForMutation(
+    selector: string,
+    opts: {
+      timeout?: number;
+      state?: "attached" | "visible" | "hidden" | "detached";
+      text?: string;
+    } = {},
+  ) {
+    const timeout = opts.timeout ?? 20_000;
+    const state = opts.state ?? "visible";
+    await this.ensureHelpers();
+    const result = await this.evaluate(
+      `(() => {
+        const sel = ${JSON.stringify(selector)};
+        const state = ${JSON.stringify(state)};
+        const needle = ${JSON.stringify(opts.text ?? null)};
+        const check = () => {
+          const el = window.__mai.find(sel);
+          if (state === 'attached') return !!el;
+          if (state === 'detached') return !el;
+          if (state === 'hidden') return !el || !window.__mai.visible(el);
+          if (!el || !window.__mai.visible(el)) return false;
+          if (needle === null) return true;
+          return window.__mai.textOf(el).toLowerCase().includes(String(needle).toLowerCase());
+        };
+        return new Promise((resolve) => {
+          if (check()) { resolve('matched'); return; }
+          const root = document.documentElement || document;
+          const observer = new MutationObserver(() => {
+            if (!check()) return;
+            observer.disconnect();
+            resolve('matched');
+          });
+          observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+          setTimeout(() => { observer.disconnect(); resolve(null); }, ${timeout});
+        });
+      })()`,
+      timeout + 5_000,
+    );
+    if (result !== "matched") {
+      throw new Error(`timed out after ${timeout}ms waiting for ${selector} to be ${state}`);
+    }
+    return `selector ${selector} is ${state}`;
   }
 
   async waitForFunction(fnOrExpr: string, opts: { timeout?: number; polling?: number } = {}) {
@@ -1089,6 +1516,167 @@ class PageHandle {
   cdpSend(method: string, params: Record<string, unknown> = {}): Promise<any> {
     return this.cdp.send(method, params);
   }
+
+  /* ---------------- extension bridge surfaces ---------------- *
+   * Proxy configuration, browsing data, history, bookmarks, extension
+   * management and system notifications sit above the debugging protocol,
+   * so CDP has no equivalent for any of them. Each call needs the Edge
+   * extension bridge; the error says so instead of failing obscurely.
+   * ---------------------------------------------------------- */
+
+  private async bridgeOnly(method: string, params: Record<string, unknown> = {}): Promise<any> {
+    if (!EXTERNAL_BRIDGE) {
+      throw new Error(
+        `${method} needs the Edge extension bridge. Start the bridge host and set RAW_BROWSER_EXTERNAL_BRIDGE=1 — plain CDP has no equivalent.`,
+      );
+    }
+    return await this.browserCdpSend(method, params);
+  }
+
+  /** the current proxy configuration */
+  async proxy(): Promise<{ value: any; levelOfControl?: string }> {
+    return await this.bridgeOnly("Raw.proxyGet");
+  }
+
+  /** switch the browser proxy; pass { mode: "direct" } to stop using one */
+  async setProxy(value: Record<string, unknown>, opts: { scope?: string } = {}) {
+    return await this.bridgeOnly("Raw.proxySet", { value, scope: opts.scope });
+  }
+
+  /** hand proxy control back to the operating system */
+  async clearProxy(opts: { scope?: string } = {}) {
+    return await this.bridgeOnly("Raw.proxyClear", { scope: opts.scope });
+  }
+
+  /** show a system notification — useful for reporting a long task from a background run */
+  async notify(title: string, message: string, opts: { silent?: boolean } = {}) {
+    return await this.bridgeOnly("Raw.notify", { title, message, silent: opts.silent });
+  }
+
+  /** search the profile's browsing history */
+  async history(query: { text?: string; maxResults?: number; startTime?: number; endTime?: number } = {}) {
+    return await this.bridgeOnly("Raw.historySearch", { query });
+  }
+
+  /** read the bookmark tree */
+  async bookmarks() {
+    return await this.bridgeOnly("Raw.bookmarksList");
+  }
+
+  /** list every installed extension with its enabled state */
+  async extensions() {
+    return await this.bridgeOnly("Raw.managementList");
+  }
+
+  /**
+   * Clear browsing data. Destructive by nature, so nothing is removed unless
+   * it is named here: a call with no true flag is rejected rather than
+   * quietly wiping the profile.
+   */
+  async clearBrowsingData(
+    dataTypes: {
+      cache?: boolean;
+      cacheStorage?: boolean;
+      cookies?: boolean;
+      downloads?: boolean;
+      fileSystems?: boolean;
+      formData?: boolean;
+      history?: boolean;
+      indexedDB?: boolean;
+      localStorage?: boolean;
+      passwords?: boolean;
+      pluginData?: boolean;
+      serviceWorkers?: boolean;
+      webSQL?: boolean;
+    },
+    opts: { since?: number; origins?: string[] } = {},
+  ) {
+    const options: Record<string, unknown> = {};
+    if (opts.since !== undefined) options.since = opts.since;
+    if (opts.origins !== undefined) options.origins = opts.origins;
+    return await this.bridgeOnly("Raw.clearBrowsingData", { dataTypes, options });
+  }
+
+  /** every cookie in the profile, optionally filtered by domain, url, name or path */
+  async cookies(
+    details: { domain?: string; url?: string; name?: string; path?: string; secure?: boolean; session?: boolean } = {},
+  ) {
+    return await this.bridgeOnly("Raw.cookiesAll", { details });
+  }
+
+  /** one cookie, or null when it does not exist */
+  async cookie(details: { url: string; name: string }) {
+    return await this.bridgeOnly("Raw.cookiesGet", { details });
+  }
+
+  /** create or overwrite a cookie */
+  async setCookie(details: {
+    url: string;
+    name: string;
+    value: string;
+    domain?: string;
+    path?: string;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: string;
+    expirationDate?: number;
+  }) {
+    return await this.bridgeOnly("Raw.cookiesSet", { details });
+  }
+
+  /** delete one cookie */
+  async removeCookie(details: { url: string; name: string }) {
+    return await this.bridgeOnly("Raw.cookiesRemove", { details });
+  }
+
+  /** change tab properties: pinned, muted, url, autoDiscardable, active */
+  async updateTab(
+    update: { pinned?: boolean; muted?: boolean; url?: string; autoDiscardable?: boolean; active?: boolean },
+    opts: { tabId?: number } = {},
+  ) {
+    const tabId = opts.tabId ?? Number(this.targetId());
+    return await this.bridgeOnly("Raw.updateTab", { tabId, update });
+  }
+
+  /** start a download in the browser itself, so it uses the profile's own download settings */
+  async download(url: string, opts: { filename?: string; saveAs?: boolean } = {}) {
+    return await this.bridgeOnly("Raw.download", {
+      options: { url, filename: opts.filename, saveAs: opts.saveAs === true },
+    });
+  }
+
+  /** cancel a download by the id reported by page.downloads() */
+  async cancelDownload(id: number) {
+    return await this.bridgeOnly("Raw.cancelDownload", { id });
+  }
+
+  /** enable or disable another installed extension */
+  async setExtensionEnabled(id: string, enabled = true) {
+    return await this.bridgeOnly("Raw.setExtensionEnabled", { id, enabled });
+  }
+
+  /** every frame in a tab, including cross-origin iframes, with its URL */
+  async frames(opts: { tabId?: number } = {}) {
+    const tabId = opts.tabId ?? Number(this.targetId());
+    return await this.bridgeOnly("Raw.frames", { tabId });
+  }
+
+  /** inject a stylesheet into a tab (this tab by default) */
+  async insertCSS(css: string, opts: { tabId?: number; allFrames?: boolean } = {}) {
+    const tabId = opts.tabId ?? Number(this.targetId());
+    return await this.bridgeOnly("Raw.insertCSS", { tabId, css, allFrames: opts.allFrames });
+  }
+
+  /** remove a stylesheet previously added by insertCSS */
+  async removeCSS(css: string, opts: { tabId?: number; allFrames?: boolean } = {}) {
+    const tabId = opts.tabId ?? Number(this.targetId());
+    return await this.bridgeOnly("Raw.removeCSS", { tabId, css, allFrames: opts.allFrames });
+  }
+
+  /** raw browser-level CDP escape hatch (Target.*, Browser.*, or a session command) */
+  async browserCdpSend(method: string, params: Record<string, unknown> = {}): Promise<any> {
+    return (await ensureBrowserCdp()).send(method, params);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1114,7 +1702,7 @@ async function browserStatusLocal(): Promise<string> {
   return [
     `debugger: ${alive ? `running on port ${PORT} (${alive.Browser ?? "browser"})` : "not running"}`,
     `attach: ${alive ? (owned ? "will reuse the running browser" : "refused: the running browser is not owned by raw") : "will launch on first use"}`,
-    `profile: ${PROFILE}`,
+    `profile: ${EXTERNAL_BRIDGE ? "Edge Default (extension bridge)" : PROFILE}`,
     `mode: ${HEADLESS ? "headless" : "headful"}`,
     `binary: ${findBrowser() ?? "not found (set RAW_BROWSER_PATH)"}`,
   ].join("\n");
