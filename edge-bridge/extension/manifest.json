@@ -1,11 +1,30 @@
 {
   "manifest_version": 3,
   "name": "Raw Edge Bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Lets the local Raw browser tool drive tabs in this Edge profile.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAub0YG034DGCj1v0EQW+z2H4E825wmRQoXKgjnq0fYYDjALcVykvta/3/VUKbfV2vO6yoBzyk6HRlvBnbpxqx9whkVzMAFKXjfgT9k4IhsmMtjRwbj33kPVvts02Zx5amkBPSkFVC2G2J08eqH+IOOXo3ZsgQz4wb1O+I+FIa0ljOJHJbryFcBI+oYJWjix14NFFze0gnP6xl4bWdfRfHmrqGG/VHburhz8jrcFQ7ZU65iyrPRxbPDiEHrtTss7JcnZG7c3QgNKC0OIeBa15b/eeuh8JDHU3KZmWATwD2zxrR3ucpQW1bbXcUzTl8EdLjOvV3jWblGfpFzX+udwUTCwIDAQAB",
-  "permissions": ["activeTab", "alarms", "bookmarks", "browsingData", "cookies", "debugger", "downloads", "history", "management", "nativeMessaging", "notifications", "proxy", "scripting", "sessions", "tabs", "webNavigation"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "bookmarks",
+    "browsingData",
+    "cookies",
+    "debugger",
+    "downloads",
+    "history",
+    "management",
+    "nativeMessaging",
+    "notifications",
+    "proxy",
+    "scripting",
+    "sessions",
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "service-worker.js"
   },

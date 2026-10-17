@@ -45,7 +45,7 @@ bool Authorized(HttpContext context) =>
 app.MapGet("/json/version", (HttpContext context) => {
     if (!Authorized(context)) return Results.Unauthorized();
     return Results.Json(new JsonObject {
-        ["Browser"] = "RawEdgeBridge/0.2",
+        ["Browser"] = "RawEdgeBridge/0.4.0",
         ["Protocol-Version"] = "1.3",
         ["Raw-Extension-Version"] = native.ExtensionVersion,
         ["webSocketDebuggerUrl"] = $"ws://127.0.0.1:{Port}/devtools/browser/raw-edge?token={Uri.EscapeDataString(token)}",
@@ -65,6 +65,8 @@ app.MapGet("/json/list", async (HttpContext context) => {
             ["title"] = tab["title"]?.DeepClone(),
             ["url"] = tab["url"]?.DeepClone(),
             ["active"] = tab["active"]?.DeepClone(),
+            ["discarded"] = tab["discarded"]?.DeepClone(),
+            ["status"] = tab["status"]?.DeepClone(),
             ["windowId"] = tab["windowId"]?.DeepClone(),
             ["webSocketDebuggerUrl"] = $"ws://127.0.0.1:{Port}/devtools/page/{id}?token={Uri.EscapeDataString(token)}",
         });

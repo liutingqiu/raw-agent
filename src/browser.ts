@@ -290,9 +290,17 @@ async function ensureBrowser(): Promise<void> {
 async function pickPageTarget(): Promise<string> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await debuggerFetch("/json/list", { signal: AbortSignal.timeout(5000) });
-    const targets = (await res.json()) as any[];
-    const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
-    if (page) return page.webSocketDebuggerUrl as string;
+    const targets = (await res.json()) as TargetInfo[];
+    const pages = targets.filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
+    pages.sort((a, b) => {
+      const aActive = a.active ? 1 : 0;
+      const bActive = b.active ? 1 : 0;
+      if (aActive !== bActive) return bActive - aActive;
+      const aDiscarded = a.discarded ? 1 : 0;
+      const bDiscarded = b.discarded ? 1 : 0;
+      return aDiscarded - bDiscarded;
+    });
+    if (pages.length && pages[0].webSocketDebuggerUrl) return pages[0].webSocketDebuggerUrl;
 
     for (const method of ["PUT", "GET"]) {
       try {
@@ -320,6 +328,8 @@ type TargetInfo = {
   title?: string;
   url: string;
   active?: boolean;
+  discarded?: boolean;
+  status?: string;
   windowId?: number;
   webSocketDebuggerUrl?: string;
 };
@@ -388,9 +398,9 @@ async function targetHttpAction(action: "activate" | "close", targetId: string):
 }
 
 async function enableDomains(cdp: Cdp) {
-  await cdp.send("Page.enable");
-  await cdp.send("Runtime.enable");
-  await cdp.send("Network.enable");
+  await cdp.send("Page.enable", {}, 5000);
+  await cdp.send("Runtime.enable", {}, 5000);
+  await cdp.send("Network.enable", {}, 5000);
 }
 
 async function attachPage(wsUrl: string): Promise<{ cdp: Cdp; page: PageHandle }> {
@@ -1691,6 +1701,35 @@ async function ensureSession(): Promise<Session> {
   session = null;
 
   await ensureBrowser();
+
+  // Try candidate targets in priority order (active & non-discarded first)
+  let candidates: string[] = [];
+  try {
+    const res = await debuggerFetch("/json/list", { signal: AbortSignal.timeout(5000) });
+    const targets = (await res.json()) as TargetInfo[];
+    const pages = targets.filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
+    pages.sort((a, b) => {
+      const aActive = a.active ? 1 : 0;
+      const bActive = b.active ? 1 : 0;
+      if (aActive !== bActive) return bActive - aActive;
+      const aDiscarded = a.discarded ? 1 : 0;
+      const bDiscarded = b.discarded ? 1 : 0;
+      return aDiscarded - bDiscarded;
+    });
+    candidates = pages.map((p) => p.webSocketDebuggerUrl as string);
+  } catch {
+    /* fallback to pickPageTarget below */
+  }
+
+  for (const wsUrl of candidates) {
+    try {
+      session = await attachPage(wsUrl);
+      return session;
+    } catch {
+      // Tab may be frozen, sleeping, or detached; try next candidate
+    }
+  }
+
   const wsUrl = await pickPageTarget();
   session = await attachPage(wsUrl);
   return session;

@@ -20,6 +20,8 @@
       title: tab.title ?? "",
       url: tab.url ?? tab.pendingUrl ?? "about:blank",
       active: tab.active === true,
+      discarded: tab.discarded === true,
+      status: tab.status ?? "complete",
       windowId: tab.windowId,
     };
   }
@@ -31,6 +33,8 @@
       type: "page",
       title: value.title,
       url: value.url,
+      active: value.active,
+      discarded: value.discarded,
       attached: false,
       canAccessOpener: true,
       browserContextId: "",
@@ -60,7 +64,10 @@
       if (pending) return pending;
       const attaching = (async () => {
         try {
-          await chromeApi.debugger.attach({ tabId }, "1.3");
+          await Promise.race([
+            chromeApi.debugger.attach({ tabId }, "1.3"),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`debugger attach timed out on tab ${tabId}`)), 5000))
+          ]);
         } catch (error) {
           if (!String(error?.message ?? error).includes("already attached")) throw error;
         }
@@ -97,7 +104,33 @@
     async function sendTabCommand(payload) {
       const tab = await tabFor(payload);
       const tabId = await ensureAttached(tab.id);
-      return await chromeApi.debugger.sendCommand({ tabId }, payload.method, payload.params ?? {});
+      
+      const timeoutMs = typeof payload.timeoutMs === "number" ? payload.timeoutMs : 5000;
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            reject(new Error(`CDP ${payload.method} timed out on tab ${tabId} after ${timeoutMs}ms (tab may be sleeping or unresponsive)`));
+          }
+        }, timeoutMs);
+
+        chromeApi.debugger.sendCommand({ tabId }, payload.method, payload.params ?? {})
+          .then((res) => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve(res);
+            }
+          })
+          .catch((err) => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              reject(err);
+            }
+          });
+      });
     }
 
     async function activate(value) {
